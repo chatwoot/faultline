@@ -48,9 +48,11 @@
           class="flex items-center justify-between py-2 border-b border-gray-200 dark:border-gray-800 last:border-0"
         >
           <div class="flex items-center gap-3">
-            <div class="w-7 h-7 rounded-sm bg-black/10 dark:bg-white/10 flex items-center justify-center text-xs font-semibold shrink-0">
-              {{ member.name.charAt(0).toUpperCase() }}
-            </div>
+            <img
+              :src="member.avatarUrl"
+              :alt="member.name"
+              class="w-7 h-7 rounded-sm shrink-0"
+            />
             <div>
               <div class="text-sm">{{ member.name }}</div>
               <div class="text-xs text-black/50 dark:text-white/50">{{ member.email }}</div>

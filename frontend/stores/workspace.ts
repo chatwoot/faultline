@@ -8,6 +8,7 @@ export interface WorkspaceMember {
   userId: string;
   email: string;
   name: string;
+  avatarUrl: string;
   role: string;
   joinedAt: string | null;
 }

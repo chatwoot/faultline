@@ -59,11 +59,11 @@
           class="flex items-center gap-2 px-3 py-2"
           :class="sidebarCollapsed && 'justify-center'"
         >
-          <div
-            class="w-5 h-5 rounded-full bg-black/10 dark:bg-white/10 flex items-center justify-center text-[10px] font-semibold shrink-0"
-          >
-            {{ authStore.user.name.charAt(0).toUpperCase() }}
-          </div>
+          <img
+            :src="authStore.user.avatarUrl"
+            :alt="authStore.user.name"
+            class="w-5 h-5 rounded-full shrink-0"
+          />
           <div v-if="!sidebarCollapsed" class="flex-1 min-w-0">
             <p class="text-xs truncate">{{ authStore.user.name }}</p>
             <p class="text-[10px] text-black/40 dark:text-white/40 truncate">{{ authStore.user.email }}</p>

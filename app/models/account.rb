@@ -31,6 +31,7 @@ class Account < ApplicationRecord
         user_id: member.user_id,
         email: member.user.email,
         name: member.user.name,
+        avatar_url: member.user.avatar_url,
         role: member.role,
         joined_at: member.created_at
       }

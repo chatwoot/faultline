@@ -11,6 +11,7 @@ from ..prompts import GUIDANCE_SENTRY
 class ErrorMonitoringAgent(BaseSubAgent):
     agent_id = "error_monitoring"  # type: ignore[assignment]
     agent_type = "Error Monitoring Agent"
+    shared_integrations = ["github"]
 
     def __init__(self, config: SubAgentConfig) -> None:
         super().__init__(config)

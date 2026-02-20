@@ -11,6 +11,7 @@ from ..prompts import GUIDANCE_NEWRELIC
 class APMAgent(BaseSubAgent):
     agent_id = "apm"  # type: ignore[assignment]
     agent_type = "APM Agent"
+    shared_integrations = ["github"]
 
     def __init__(self, config: SubAgentConfig) -> None:
         super().__init__(config)

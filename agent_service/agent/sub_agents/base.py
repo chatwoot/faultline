@@ -62,6 +62,7 @@ class SubAgentConfig:
 class BaseSubAgent(ABC):
     agent_id: SubAgentType
     agent_type: str
+    shared_integrations: list[str] = []
 
     def __init__(self, config: SubAgentConfig) -> None:
         self.config = config
@@ -98,8 +99,9 @@ class BaseSubAgent(ABC):
     def get_tools(self) -> list[dict[str, Any]]:
         own = self.get_own_tools()
         shared: list[dict[str, Any]] = []
-        if "github" in self.config.enabled_integrations:
-            shared.extend(self.get_mcp_tools("github"))
+        for integration in self.shared_integrations:
+            if integration in self.config.enabled_integrations:
+                shared.extend(self.get_mcp_tools(integration))
         return [*own, *shared]
 
     # ── Run loop ──────────────────────────────────────────────

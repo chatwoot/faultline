@@ -83,7 +83,7 @@ class MCPClientManager:
                     name=name,
                     transport="stdio",
                     command="npx",
-                    args=["-y", "@sentry/mcp-server", "--organization-slug", sentry_org],
+                    args=["-y", "@sentry/mcp-server@latest"],
                     env={"SENTRY_ACCESS_TOKEN": sentry_token},
                 ))
 
@@ -200,7 +200,10 @@ class MCPClientManager:
         return [
             t["tool"]
             for t in self._tools.values()
-            if t["server"] in integrations
+            if any(
+                t["server"] == name or t["server"].startswith(f"{name}-")
+                for name in integrations
+            )
         ]
 
     async def call_tool(self, tool_name: str, args: dict[str, Any]) -> Any:

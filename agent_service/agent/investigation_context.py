@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class ResourceEntry:
@@ -40,6 +43,172 @@ class ResourceEntry:
         )
 
 
+# ── Investigation Plan ─────────────────────────────────────────
+
+# Mapping from incident keywords to required checks
+INCIDENT_TYPE_CHECKS: dict[str, list[dict[str, Any]]] = {
+    "rds": [
+        {"check_id": "cw_rds_cpu", "agent_id": "infrastructure", "description": "CloudWatch RDS CPUUtilization, DatabaseConnections, FreeableMemory", "tool_patterns": ["cloudwatch", "get-metric"]},
+        {"check_id": "cw_rds_io", "agent_id": "infrastructure", "description": "CloudWatch RDS ReadLatency, WriteLatency, ReadIOPS, WriteIOPS, DiskQueueDepth", "tool_patterns": ["cloudwatch", "get-metric"]},
+        {"check_id": "pi_rds", "agent_id": "infrastructure", "description": "Performance Insights top SQL queries and wait events", "tool_patterns": ["pi", "performance-insights"]},
+        {"check_id": "rds_events", "agent_id": "infrastructure", "description": "RDS event log for recent events", "tool_patterns": ["rds", "describe-events"]},
+        {"check_id": "sentry_errors", "agent_id": "error_monitoring", "description": "Sentry errors in incident time window", "tool_patterns": ["sentry"]},
+        {"check_id": "apm_golden", "agent_id": "apm", "description": "APM golden metrics (throughput, error rate, response time)", "tool_patterns": ["newrelic", "nrql"]},
+        {"check_id": "apm_db", "agent_id": "apm", "description": "APM database/datastore operation latency", "tool_patterns": ["newrelic", "nrql", "datastore"]},
+        {"check_id": "apm_logs", "agent_id": "apm", "description": "APM log analysis for error patterns", "tool_patterns": ["newrelic", "nrql", "log"]},
+    ],
+    "ecs": [
+        {"check_id": "cw_ecs", "agent_id": "infrastructure", "description": "CloudWatch ECS CPUUtilization, MemoryUtilization, task counts", "tool_patterns": ["cloudwatch", "get-metric"]},
+        {"check_id": "ecs_events", "agent_id": "infrastructure", "description": "ECS service events and task failures", "tool_patterns": ["ecs", "describe"]},
+        {"check_id": "cw_logs", "agent_id": "infrastructure", "description": "CloudWatch Logs error patterns", "tool_patterns": ["logs", "filter-log-events"]},
+        {"check_id": "sentry_errors", "agent_id": "error_monitoring", "description": "Sentry errors in incident time window", "tool_patterns": ["sentry"]},
+        {"check_id": "apm_golden", "agent_id": "apm", "description": "APM golden metrics", "tool_patterns": ["newrelic", "nrql"]},
+        {"check_id": "apm_logs", "agent_id": "apm", "description": "APM log analysis for error patterns", "tool_patterns": ["newrelic", "nrql", "log"]},
+    ],
+    "lambda": [
+        {"check_id": "cw_lambda", "agent_id": "infrastructure", "description": "CloudWatch Lambda Duration, Errors, Throttles, ConcurrentExecutions", "tool_patterns": ["cloudwatch", "get-metric"]},
+        {"check_id": "cw_logs", "agent_id": "infrastructure", "description": "CloudWatch Logs for Lambda error patterns", "tool_patterns": ["logs", "filter-log-events"]},
+        {"check_id": "sentry_errors", "agent_id": "error_monitoring", "description": "Sentry errors in incident time window", "tool_patterns": ["sentry"]},
+        {"check_id": "apm_golden", "agent_id": "apm", "description": "APM golden metrics", "tool_patterns": ["newrelic", "nrql"]},
+    ],
+    "ec2": [
+        {"check_id": "cw_ec2", "agent_id": "infrastructure", "description": "CloudWatch EC2 CPUUtilization, StatusCheckFailed, NetworkIn/Out", "tool_patterns": ["cloudwatch", "get-metric"]},
+        {"check_id": "ec2_status", "agent_id": "infrastructure", "description": "EC2 instance status checks", "tool_patterns": ["ec2", "describe"]},
+        {"check_id": "cw_logs", "agent_id": "infrastructure", "description": "CloudWatch Logs for error patterns", "tool_patterns": ["logs", "filter-log-events"]},
+        {"check_id": "sentry_errors", "agent_id": "error_monitoring", "description": "Sentry errors in incident time window", "tool_patterns": ["sentry"]},
+        {"check_id": "apm_golden", "agent_id": "apm", "description": "APM golden metrics", "tool_patterns": ["newrelic", "nrql"]},
+    ],
+    "generic": [
+        {"check_id": "sentry_errors", "agent_id": "error_monitoring", "description": "Sentry errors in incident time window", "tool_patterns": ["sentry"]},
+        {"check_id": "apm_golden", "agent_id": "apm", "description": "APM golden metrics", "tool_patterns": ["newrelic", "nrql"]},
+        {"check_id": "apm_logs", "agent_id": "apm", "description": "APM log analysis", "tool_patterns": ["newrelic", "nrql", "log"]},
+        {"check_id": "cw_alarms", "agent_id": "infrastructure", "description": "CloudWatch alarm states", "tool_patterns": ["cloudwatch", "describe-alarms"]},
+    ],
+}
+
+# Keywords that map incident descriptions to types
+INCIDENT_TYPE_KEYWORDS: dict[str, list[str]] = {
+    "rds": ["rds", "database", "db", "aurora", "postgres", "mysql", "mariadb", "sql"],
+    "ecs": ["ecs", "fargate", "container", "task"],
+    "lambda": ["lambda", "serverless", "function"],
+    "ec2": ["ec2", "instance", "server", "compute"],
+}
+
+
+class InvestigationPlan:
+    """Tracks what checks are required and what's been done."""
+
+    def __init__(self) -> None:
+        self.required_checks: list[dict[str, Any]] = []
+        self.findings: list[dict[str, Any]] = []
+        self.missing_data: list[str] = []
+
+    @classmethod
+    def generate_plan(cls, incident_description: str) -> InvestigationPlan:
+        """Generate a pre-populated plan based on the incident type."""
+        plan = cls()
+        lower = incident_description.lower()
+
+        matched_type = "generic"
+        for incident_type, keywords in INCIDENT_TYPE_KEYWORDS.items():
+            if any(kw in lower for kw in keywords):
+                matched_type = incident_type
+                break
+
+        template_checks = INCIDENT_TYPE_CHECKS.get(matched_type, INCIDENT_TYPE_CHECKS["generic"])
+        for check_template in template_checks:
+            plan.required_checks.append({
+                **check_template,
+                "status": "pending",
+            })
+
+        logger.info("Generated investigation plan: type=%s, checks=%d", matched_type, len(plan.required_checks))
+        return plan
+
+    def mark_check_complete(self, check_id: str, findings_summary: str) -> None:
+        for check in self.required_checks:
+            if check["check_id"] == check_id:
+                check["status"] = "complete"
+                break
+        self.findings.append({"check_id": check_id, "summary": findings_summary})
+
+    def mark_check_by_tool(self, tool_name: str, agent_id: str) -> None:
+        """Mark checks as complete based on a tool that was called."""
+        tool_lower = tool_name.lower()
+        for check in self.required_checks:
+            if check["status"] != "pending" or check["agent_id"] != agent_id:
+                continue
+            if any(pat in tool_lower for pat in check["tool_patterns"]):
+                check["status"] = "complete"
+
+    def get_incomplete_checks(self) -> list[dict[str, Any]]:
+        return [c for c in self.required_checks if c["status"] == "pending"]
+
+    def get_checks_for_agent(self, agent_id: str) -> list[dict[str, Any]]:
+        return [c for c in self.required_checks if c["agent_id"] == agent_id and c["status"] == "pending"]
+
+    def add_finding(self, agent_id: str, iteration: int, summary: str, severity: str = "info", evidence: str = "") -> None:
+        self.findings.append({
+            "agent_id": agent_id,
+            "iteration": iteration,
+            "summary": summary,
+            "severity": severity,
+            "evidence": evidence,
+        })
+
+    def build_status_summary(self) -> str:
+        completed = [c for c in self.required_checks if c["status"] == "complete"]
+        pending = self.get_incomplete_checks()
+
+        lines = [f"**Investigation Plan:** {len(completed)}/{len(self.required_checks)} checks complete"]
+
+        if completed:
+            lines.append("\nCompleted:")
+            for c in completed:
+                lines.append(f"  - [done] {c['description']}")
+
+        if pending:
+            lines.append("\nPending:")
+            for c in pending:
+                lines.append(f"  - [TODO] {c['description']} (→ {c['agent_id']})")
+
+        if self.missing_data:
+            lines.append("\nMissing data:")
+            for gap in self.missing_data:
+                lines.append(f"  - {gap}")
+
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "requiredChecks": self.required_checks,
+            "findings": self.findings,
+            "missingData": self.missing_data,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> InvestigationPlan:
+        plan = cls()
+        plan.required_checks = data.get("requiredChecks", [])
+        plan.findings = data.get("findings", [])
+        plan.missing_data = data.get("missingData", [])
+        return plan
+
+
+# ── Critical Signal Detection ─────────────────────────────────
+
+CRITICAL_PATTERNS: dict[str, str] = {
+    r"PG::QueryCanceled": "database_timeout",
+    r"OOM|Out of memory|OutOfMemoryError": "memory_exhaustion",
+    r"connection refused|connection timeout|ECONNREFUSED": "connectivity_failure",
+    r"CPU.*9[0-9]%|CPU.*100%|CPUUtilization.*9[0-9]|CPUUtilization.*100": "cpu_saturation",
+    r"deadlock|Deadlock": "deadlock",
+    r"disk full|no space left|ENOSPC": "disk_exhaustion",
+    r"throttl|rate.?limit|429": "throttling",
+    r"max_connections|too many connections|connection pool exhausted": "connection_exhaustion",
+}
+
+
 class InvestigationContext:
     """Tracks investigation state across the agent loop.
 
@@ -64,6 +233,9 @@ class InvestigationContext:
         }
         self.resources: list[ResourceEntry] = []
         self.scoped_group_name: str | None = None
+        self.investigation_plan: InvestigationPlan | None = None
+        self.critical_signals: list[dict[str, Any]] = []
+        self.correlation_summary: str | None = None
 
     # ── Parse user message ──────────────────────────────────────
 
@@ -147,10 +319,12 @@ class InvestigationContext:
             if m:
                 try:
                     incident_time = datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+                    # Normalize to UTC
+                    incident_time = incident_time.astimezone(timezone.utc)
                     start = incident_time - timedelta(hours=1)
                     end = incident_time + timedelta(hours=1)
                     self.time_window = {
-                        "description": f"around incident time {incident_time.isoformat()}",
+                        "description": f"around incident time {incident_time.strftime('%Y-%m-%d %H:%M:%S')} UTC",
                         "start": start,
                         "end": end,
                         "extracted": True,
@@ -351,6 +525,42 @@ class InvestigationContext:
                 return
         self.resources.append(entry)
 
+    # ── Investigation plan ────────────────────────────────────────
+
+    def generate_investigation_plan(self, incident_description: str) -> None:
+        """Generate and attach an investigation plan based on the incident description."""
+        self.investigation_plan = InvestigationPlan.generate_plan(incident_description)
+
+    # ── Critical signals ───────────────────────────────────────
+
+    def add_critical_signal(self, signal: dict[str, Any]) -> None:
+        """Add a critical signal detected from tool output."""
+        # Deduplicate by pattern + category
+        for existing in self.critical_signals:
+            if existing["category"] == signal["category"] and existing.get("match") == signal.get("match"):
+                return
+        self.critical_signals.append(signal)
+
+    def build_evidence_brief(self) -> str | None:
+        """Summarize all critical signals grouped by category."""
+        if not self.critical_signals:
+            return None
+
+        by_category: dict[str, list[dict[str, Any]]] = {}
+        for sig in self.critical_signals:
+            by_category.setdefault(sig["category"], []).append(sig)
+
+        lines = ["**Critical Signals Detected:**"]
+        for category, signals in by_category.items():
+            lines.append(f"\n_{category}_:")
+            for sig in signals:
+                source = sig.get("source_tool", "unknown")
+                agent = sig.get("agent_id", "unknown")
+                match_text = sig.get("match", "")
+                lines.append(f"  - [{agent}/{source}] {match_text}")
+
+        return "\n".join(lines)
+
     # ── Context message for model ───────────────────────────────
 
     def build_context_message(self) -> str | None:
@@ -360,15 +570,40 @@ class InvestigationContext:
         end = self.time_window.get("end")
 
         if start and end:
-            padded_start = start - timedelta(minutes=30)
-            window_ms = (end - start).total_seconds() * 1000
+            # Normalize to UTC for consistency
+            utc_start = start.astimezone(timezone.utc) if start.tzinfo else start.replace(tzinfo=timezone.utc)
+            utc_end = end.astimezone(timezone.utc) if end.tzinfo else end.replace(tzinfo=timezone.utc)
+            padded_start = utc_start - timedelta(minutes=30)
+            window_ms = (utc_end - utc_start).total_seconds() * 1000
             is_broad = window_ms > 3 * 24 * 60 * 60 * 1000
+
+            # Format as UTC strings (no timezone offset — safe for all query languages)
+            start_utc_str = utc_start.strftime("%Y-%m-%d %H:%M:%S")
+            end_utc_str = utc_end.strftime("%Y-%m-%d %H:%M:%S")
+            padded_start_utc_str = padded_start.strftime("%Y-%m-%d %H:%M:%S")
+
+            # Calculate NRQL-safe relative time (hours ago from now)
+            now = datetime.now(timezone.utc)
+            hours_since_start = (now - utc_start).total_seconds() / 3600
+            hours_since_end = (now - utc_end).total_seconds() / 3600
+
+            # Epoch milliseconds for AWS CloudWatch
+            start_epoch_ms = int(utc_start.timestamp() * 1000)
+            end_epoch_ms = int(utc_end.timestamp() * 1000)
 
             parts.append(
                 f"**Investigation time window:** {self.time_window['description']}\n"
-                f"  start: {start.isoformat()}\n"
-                f"  end:   {end.isoformat()}\n"
-                f"  query_start (padded -30min): {padded_start.isoformat()}"
+                f"  start (UTC): {start_utc_str}\n"
+                f"  end (UTC):   {end_utc_str}\n"
+                f"  padded_start (UTC, -30min): {padded_start_utc_str}\n"
+                f"\n"
+                f"  **NRQL time (use these EXACTLY):**\n"
+                f"    Absolute: SINCE '{padded_start_utc_str}' UNTIL '{end_utc_str}'\n"
+                f"    Relative: SINCE {int(hours_since_start) + 1} hours ago UNTIL {max(0, int(hours_since_end))} hours ago\n"
+                f"\n"
+                f"  **AWS CloudWatch epoch ms:**\n"
+                f"    startTime: {start_epoch_ms}\n"
+                f"    endTime: {end_epoch_ms}"
             )
             if is_broad:
                 parts.append(
@@ -412,6 +647,16 @@ class InvestigationContext:
                     attr_parts = ", ".join(f"{k}={v}" for k, v in r.attrs.items() if v)
                     parts.append(f"- {r.name}{id_part}{f' [{attr_parts}]' if attr_parts else ''}")
 
+        if self.investigation_plan:
+            parts.append(f"\n{self.investigation_plan.build_status_summary()}")
+
+        evidence = self.build_evidence_brief()
+        if evidence:
+            parts.append(f"\n{evidence}")
+
+        if self.correlation_summary:
+            parts.append(f"\n**Cross-Agent Correlation:**\n{self.correlation_summary}")
+
         return "\n".join(parts)
 
     # ── Serialization ───────────────────────────────────────────
@@ -436,16 +681,31 @@ class InvestigationContext:
         }
         if self.scoped_group_name:
             d["scopedGroupName"] = self.scoped_group_name
+        if self.investigation_plan:
+            d["investigationPlan"] = self.investigation_plan.to_dict()
+        if self.critical_signals:
+            d["criticalSignals"] = self.critical_signals
+        if self.correlation_summary:
+            d["correlationSummary"] = self.correlation_summary
         return d
 
     @classmethod
     def from_dict(cls, snapshot: dict[str, Any]) -> InvestigationContext:
         ctx = cls()
         tw = snapshot.get("timeWindow", {})
+
+        def _parse_utc(val: str | None) -> datetime | None:
+            if not val:
+                return None
+            dt = datetime.fromisoformat(val)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
         ctx.time_window = {
             "description": tw.get("description", "last 24 hours"),
-            "start": datetime.fromisoformat(tw["start"]) if tw.get("start") else None,
-            "end": datetime.fromisoformat(tw["end"]) if tw.get("end") else None,
+            "start": _parse_utc(tw.get("start")),
+            "end": _parse_utc(tw.get("end")),
             "extracted": tw.get("extracted", False),
         }
         ctx.entities = snapshot.get("entities", {})
@@ -459,6 +719,10 @@ class InvestigationContext:
         }
         ctx.resources = [ResourceEntry.from_dict(r) for r in snapshot.get("resources", [])]
         ctx.scoped_group_name = snapshot.get("scopedGroupName")
+        if snapshot.get("investigationPlan"):
+            ctx.investigation_plan = InvestigationPlan.from_dict(snapshot["investigationPlan"])
+        ctx.critical_signals = snapshot.get("criticalSignals", [])
+        ctx.correlation_summary = snapshot.get("correlationSummary")
         return ctx
 
     def parse_all_user_messages(self, messages: list[dict[str, str]]) -> None:

@@ -6,12 +6,23 @@
         <h1 class="text-sm font-medium truncate mr-4">
           {{ conversationTitle }}
         </h1>
-        <button
-          @click="newConversation"
-          class="shrink-0 px-4 py-2 border border-gray-300 dark:border-gray-700 hover:bg-black hover:text-white dark:hover:bg-white dark:hover:text-black transition-colors text-sm"
-        >
-          New Conversation
-        </button>
+        <div class="flex items-center gap-2">
+          <button
+            @click="copyDebug"
+            :disabled="messages.length === 0"
+            class="shrink-0 flex items-center gap-1.5 px-3 py-2 border border-gray-300 dark:border-gray-700 hover:bg-black hover:text-white dark:hover:bg-white dark:hover:text-black transition-colors text-sm disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            <ClipboardDocumentIcon v-if="!debugCopied" class="w-3.5 h-3.5" />
+            <ClipboardDocumentCheckIcon v-else class="w-3.5 h-3.5 text-green-600 dark:text-green-400" />
+            <span>{{ debugCopied ? 'Copied' : 'Copy Debug' }}</span>
+          </button>
+          <button
+            @click="newConversation"
+            class="shrink-0 px-4 py-2 border border-gray-300 dark:border-gray-700 hover:bg-black hover:text-white dark:hover:bg-white dark:hover:text-black transition-colors text-sm"
+          >
+            New Conversation
+          </button>
+        </div>
       </div>
     </div>
 
@@ -209,8 +220,10 @@
 import { ref, computed, onMounted, watch, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
 import { LockClosedIcon } from '@heroicons/vue/24/solid';
+import { ClipboardDocumentIcon, ClipboardDocumentCheckIcon } from '@heroicons/vue/24/outline';
 import { useAgent } from '../composables/useAgent';
 import { useAgentStore } from '../stores/agent';
+import type { ToolUse, EvaluationResult } from '../types';
 import MessageList from './MessageList.vue';
 import WelcomeScreen from './WelcomeScreen.vue';
 import ToolUsageIndicator from './ToolUsageIndicator.vue';
@@ -331,6 +344,126 @@ const hasActiveThread = computed(() =>
 const conversationTitle = computed(() =>
   agentStore.currentConversation?.title || 'New Conversation'
 );
+
+// ── Debug copy ──────────────────────────────────────────────────
+const debugCopied = ref(false);
+
+function formatToolUse(tu: ToolUse): string {
+  const lines: string[] = [];
+  lines.push(`Tool: ${tu.name}`);
+  if (tu.integration) lines.push(`Integration: ${tu.integration}`);
+  if (tu.agentId) lines.push(`Agent: ${tu.agentId}`);
+  lines.push(`Status: ${tu.status}${tu.executionTimeMs != null ? ` (${tu.executionTimeMs}ms)` : ''}`);
+  if (tu.input && Object.keys(tu.input).length > 0) {
+    lines.push(`Input: ${JSON.stringify(tu.input, null, 2)}`);
+  }
+  if (tu.error) {
+    lines.push(`Error: ${tu.error}`);
+  }
+  if (tu.output != null) {
+    const outputStr = typeof tu.output === 'string' ? tu.output : JSON.stringify(tu.output, null, 2);
+    lines.push(`Output: ${outputStr}`);
+  }
+  return lines.join('\n');
+}
+
+function formatEvaluation(ev: { iteration: number; evaluation: EvaluationResult }): string {
+  const e = ev.evaluation;
+  const lines = [
+    `Iteration: ${ev.iteration}`,
+    `Status: ${e.status} | Confidence: ${e.confidence}%`,
+    `Summary: ${e.summary}`,
+  ];
+  if (e.nextSteps?.length > 0) {
+    lines.push('Next Steps:');
+    for (const step of e.nextSteps) {
+      lines.push(`  → ${step}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function buildDebugDump(): string {
+  const conv = agentStore.currentConversation;
+  if (!conv) return '';
+
+  const sections: string[] = [];
+  const divider = '─'.repeat(60);
+
+  // Header
+  sections.push([
+    `# Debug Dump: ${conv.title || 'Untitled Conversation'}`,
+    `Conversation ID: ${conv.id}`,
+    `Created: ${conv.createdAt}`,
+    `Messages: ${conv.messages.length}`,
+  ].join('\n'));
+
+  // Messages
+  for (const msg of conv.messages) {
+    const ts = new Date(msg.createdAt).toISOString();
+
+    if (msg.messageType === 'tool_use' && msg.toolUses) {
+      sections.push([
+        divider,
+        `## [TOOL] ${ts}`,
+        formatToolUse(msg.toolUses),
+      ].join('\n'));
+    } else if (msg.messageType === 'evaluation' && msg.reasoning) {
+      sections.push([
+        divider,
+        `## [EVALUATION] ${ts}`,
+        formatEvaluation(msg.reasoning),
+      ].join('\n'));
+    } else if (msg.messageType === 'note') {
+      const mentionStr = msg.mentions?.length
+        ? `\nMentions: ${msg.mentions.map(m => `@${m.name}`).join(', ')}`
+        : '';
+      sections.push([
+        divider,
+        `## [NOTE] ${ts}`,
+        msg.content,
+        mentionStr,
+      ].filter(Boolean).join('\n'));
+    } else if (msg.role === 'user') {
+      sections.push([
+        divider,
+        `## [USER] ${ts}`,
+        msg.content,
+      ].join('\n'));
+    } else if (msg.role === 'assistant') {
+      sections.push([
+        divider,
+        `## [ASSISTANT] ${ts}`,
+        msg.content,
+      ].join('\n'));
+    }
+  }
+
+  return sections.join('\n\n');
+}
+
+async function copyDebug() {
+  const dump = buildDebugDump();
+  if (!dump) return;
+
+  try {
+    await navigator.clipboard.writeText(dump);
+    debugCopied.value = true;
+    setTimeout(() => { debugCopied.value = false; }, 1500);
+  } catch {
+    // Fallback for non-secure contexts
+    const textarea = document.createElement('textarea');
+    textarea.value = dump;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+    debugCopied.value = true;
+    setTimeout(() => { debugCopied.value = false; }, 1500);
+  }
+}
 
 // ── Scroll tracking ──────────────────────────────────────────────
 const isNearBottom = ref(true);

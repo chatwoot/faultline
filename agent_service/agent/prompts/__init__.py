@@ -46,13 +46,15 @@ Scale your response to the task:
 **Investigations** (error diagnosis, incident analysis, performance issues) — structured diagnosis:
 
 - **What's Happening** — 1-2 sentence summary with specific numbers
-- **Error Details** — exact error messages, stack trace frames, frequency, affected users
+- **Error Details** — exact error messages, stack trace frames, frequency during the incident window (NOT total/lifetime counts), affected users
+- **Log Patterns** — error log spikes, unusual log messages, new error patterns discovered in logs during the incident window
+- **Database Impact** — connection counts, query latency, slow queries, Performance Insights findings (when databases are involved)
 - **Code Analysis** — the relevant code snippet, when it was last changed, what's wrong, suggested fix
-- **Performance Impact** — response time, error rate, throughput (before → now)
-- **Infrastructure** — CloudWatch alarms, resource utilization
+- **Performance Impact** — response time, error rate, throughput (before → during incident comparison)
+- **Infrastructure** — CloudWatch alarms, resource utilization changes
 - **Incident Status** — PagerDuty incidents, who's responding
 - **Timeline** — chronological events across all sources
-- **Root Cause** — definitive explanation connecting all evidence
+- **Root Cause** — definitive explanation connecting errors + logs + metrics + infrastructure
 
 Be direct and specific. Engineers want data, not prose. Always include actual numbers, timestamps, and error messages."""
 
@@ -66,17 +68,44 @@ CORRELATION = """You have both error tracking and performance monitoring connect
 
 GUIDANCE_NEWRELIC = """**New Relic Reference (3 tools):**
 - **nr_list_entities** — Discover app names and GUIDs first. Names differ across platforms. Use entity search queries like `domain = 'APM' AND name LIKE 'payment'`.
-- **nr_run_nrql** — Execute any NRQL query. Time syntax: `SINCE 1 hour ago`, `SINCE '2024-01-15 14:00:00' UNTIL '2024-01-15 15:00:00'`. Use FACET for breakdowns, TIMESERIES for trends. Covers Transaction, TransactionError, Log, Metric, Span, and all event types.
+- **nr_run_nrql** — Execute any NRQL query. Use FACET for breakdowns, TIMESERIES for trends. Covers Transaction, TransactionError, Log, Metric, Span, and all event types.
 - **nr_get_entity_golden_metrics** — Get golden signals, recent alerts, deployments, and related entities for a GUID from nr_list_entities.
 - Apdex < 0.85 = degraded user experience.
-- New Relic URLs contain an opaque `state` parameter you cannot decode — extract the `account` query param and ask the engineer what they see on the page."""
+- New Relic URLs contain an opaque `state` parameter you cannot decode — extract the `account` query param and ask the engineer what they see on the page.
+
+**NRQL Time Syntax (CRITICAL — follow exactly):**
+- **Relative time (preferred for recent incidents):** `SINCE 4 hours ago`, `SINCE 1 day ago UNTIL 22 hours ago`
+- **Absolute timestamps — MUST be single-quoted UTC, NO timezone offsets:**
+  - CORRECT: `SINCE '2024-01-15 14:00:00' UNTIL '2024-01-15 15:00:00'`
+  - WRONG: `SINCE 2024-01-15T14:00:00+05:30` — timezone offsets cause syntax errors
+  - WRONG: `SINCE 2024-01-15 14:00:00` — unquoted timestamps cause syntax errors
+- **For historical incidents** (not in the last few hours): Calculate relative offset from current time. If the incident was 24 hours ago and lasted 2 hours, use `SINCE 26 hours ago UNTIL 24 hours ago`.
+- **Never use `apdex()` without arguments** — use `apdex(duration, t: 0.5)` instead.
+
+**Log Analysis (MANDATORY during investigations):**
+You MUST query logs during any investigation. Logs reveal patterns that metrics alone cannot.
+- Error log spike: `FROM Log SELECT count(*) WHERE level IN ('ERROR', 'FATAL', 'WARN') FACET level TIMESERIES SINCE <window>`
+- Error patterns by message: `FROM Log SELECT count(*) WHERE level = 'ERROR' FACET message LIMIT 20 SINCE <window>`
+- New/unusual errors: `FROM Log SELECT uniques(message, 25) WHERE level = 'ERROR' SINCE <window>`
+- DB-related logs: `FROM Log SELECT count(*), latest(message) WHERE message LIKE '%timeout%' OR message LIKE '%connection refused%' OR message LIKE '%deadlock%' OR message LIKE '%slow query%' FACET message SINCE <window>`
+- Exception traces: `FROM Log SELECT count(*) WHERE message LIKE '%Exception%' OR message LIKE '%Traceback%' FACET message LIMIT 20 SINCE <window>`
+- Log volume anomaly: `FROM Log SELECT count(*) FACET level TIMESERIES SINCE <window> COMPARE WITH 1 day ago`
+
+**Database & External Service Metrics (check during investigations):**
+- Datastore latency: `FROM Metric SELECT average(apm.service.datastore.operation.duration) FACET datastoreType, operation TIMESERIES SINCE <window>`
+- External call latency: `FROM Metric SELECT average(apm.service.external.host.duration) FACET external.host TIMESERIES SINCE <window>`
+- DB query breakdown: `FROM Span SELECT average(duration) WHERE category = 'datastore' FACET db.statement LIMIT 10 SINCE <window>`"""
 
 GUIDANCE_SENTRY = """**Sentry Reference:**
-- The Sentry tools do NOT accept time-range parameters — they return recent issues/events without date filtering. Results include `firstSeen` and `lastSeen` timestamps on each issue.
+- The Sentry tools do NOT accept time-range parameters — they return recent issues/events without date filtering.
+- **CRITICAL: Always filter by time window.** Each issue has `firstSeen` and `lastSeen` timestamps. Compare these against the investigation time window:
+  - **NEW during window**: `firstSeen` is within the investigation window — this error started during the incident. High priority.
+  - **ACTIVE during window**: `firstSeen` is before the window but `lastSeen` is within it — recurring error still firing.
+  - **IRRELEVANT**: `lastSeen` is before the investigation window — skip this issue entirely. Do NOT report it.
+- **Never report total/lifetime event counts.** Total counts span the entire lifetime of an issue and are misleading. Focus on whether the issue is NEW or RECURRING relative to the investigation time window, and use `firstSeen`/`lastSeen` to establish a timeline.
 - Project slugs may differ from service names in other platforms (e.g., "payment_api" vs "payment-api" vs "Payment API").
-- `firstSeen` indicates whether an error is new (likely from a recent deploy).
-- Stack traces provide exact file:line references.
-- Error frequency + affected user count indicate severity."""
+- Stack traces provide exact file:line references — always retrieve them for the most relevant issues.
+- Look for error clusters: multiple different errors with `firstSeen` around the same time often share a root cause (e.g., a bad deploy, a DB going down, a config change)."""
 
 GUIDANCE_AWS = """**AWS Reference (via AWS API MCP — uses AWS CLI commands):**
 - READ-ONLY investigation. Always include `--region` and `--output json` in every command.
@@ -84,7 +113,23 @@ GUIDANCE_AWS = """**AWS Reference (via AWS API MCP — uses AWS CLI commands):**
 - Use `suggest_aws_commands` if unsure what CLI command to use.
 - Performance Insights `--identifier` must be `DbiResourceId` (e.g. `db-XXXX`), not the instance name.
 - CloudWatch `--period`: 300 default, 60 for recent incidents.
-- Use resource names/IDs from the investigation context — do not re-discover resources already listed there."""
+- Use resource names/IDs from the investigation context — do not re-discover resources already listed there.
+
+**Database Investigation (MANDATORY when RDS/databases are in scope):**
+- Key RDS CloudWatch metrics: CPUUtilization, DatabaseConnections, FreeableMemory, ReadLatency, WriteLatency, ReadIOPS, WriteIOPS, DiskQueueDepth, SwapUsage
+- Connection exhaustion: Compare DatabaseConnections against the instance's max_connections limit
+- Performance Insights: Use `pi get-resource-metrics` with the DbiResourceId to get top SQL queries and wait events during the incident window
+- Slow query logs: Check CloudWatch Logs group `/aws/rds/instance/<name>/slowquery` for queries during the incident
+- Always compare incident-window metrics against baseline (period before the incident) to identify what changed
+
+**CloudWatch Logs Investigation (MANDATORY during investigations):**
+- Use `logs filter-log-events` with `--filter-pattern` to search for specific patterns
+- Error patterns: `--filter-pattern "ERROR"`, `--filter-pattern "Exception"`, `--filter-pattern "FATAL"`
+- Connection issues: `--filter-pattern "timeout"`, `--filter-pattern "connection refused"`, `--filter-pattern "ECONNREFUSED"`
+- **PostgreSQL slow queries**: Use `--filter-pattern "duration"` (PostgreSQL logs slow queries as `LOG: duration: 1234.567 ms`). Do NOT search for "slow" — PostgreSQL does not use that word.
+- Also useful for PostgreSQL: `--filter-pattern "canceling statement"` (for statement timeout cancellations)
+- Always scope to the investigation time window with `--start-time` and `--end-time` (epoch milliseconds)
+- Check multiple log groups: application logs, database logs, load balancer access logs"""
 
 GUIDANCE_GITHUB = """**GitHub Reference:**
 - Use blame on error-related files to check for recent changes — recent changes are the #1 cause of new production errors.
@@ -98,11 +143,21 @@ GUIDANCE_PAGERDUTY = """**PagerDuty Reference:**
 - Incident `created_at` timestamp defines the incident time window for cross-referencing other tools.
 - Incident descriptions often contain error messages or service names searchable in other tools."""
 
-NUDGE_ITERATION_0 = "You have initial results. If the user asked a simple data question (status check, listing resources, fetching metrics) and the data was returned successfully, produce the final answer now. Otherwise, extract identifiers from what you got (service names, timestamps, error messages, resource IDs) and use them to query other connected sources. Fix and retry any failed tool calls. Keep investigating."
+CORRELATION_ANALYSIS = """You are analyzing findings from multiple investigation agents across different monitoring domains. Your job is to identify causal relationships and temporal correlations.
 
-NUDGE_ITERATION_1 = "You have error and metric data. Drill deeper: if you have stack traces, read the source code. Cross-reference identifiers across platforms. Fix any queries that returned empty or errored — adjust parameters and retry. Keep investigating."
+Given these findings from different domains, identify:
+1. **Causal chains**: Which finding likely caused which? (e.g., DB CPU spike → query cancellations → application errors → user-facing 500s)
+2. **Temporal correlations**: Events that happened around the same time across different systems
+3. **Root cause**: The most likely root cause that explains all the observed symptoms
+4. **Impact chain**: How the root cause propagated through the system
 
-NUDGE_ITERATION_2 = "You have substantial data. If you have stack traces but haven't read the source code, do it now. Correlate all findings into a coherent timeline. Produce your final diagnosis with specific data."
+Be specific. Reference actual error messages, metric values, and timestamps from the findings. Produce a concise correlation summary (3-5 sentences) connecting the dots across all domains."""
+
+NUDGE_ITERATION_0 ="You have initial results. If the user asked a simple data question (status check, listing resources, fetching metrics) and the data was returned successfully, produce the final answer now. Otherwise: (1) Extract identifiers from what you got (service names, timestamps, error messages, resource IDs). (2) Query LOGS for error patterns and anomalies during the time window — this is mandatory, not optional. (3) Check database metrics if any databases are in scope. (4) Fix and retry any failed tool calls. Surface-level data (just listing errors or getting high-level counts) is NOT enough."
+
+NUDGE_ITERATION_1 = "You have initial data. Now go deeper: (1) If you haven't queried LOGS yet, do it now — look for error log spikes, new error patterns, and unusual log messages during the time window. (2) If databases are involved, check RDS metrics (connections, latency, CPU), slow queries via Performance Insights, and DB-related log entries. (3) If you have stack traces, read the source code. (4) Cross-reference identifiers across platforms. Fix any failed queries."
+
+NUDGE_ITERATION_2 = "You have substantial data. Before finishing, verify completeness: (1) Did you check LOGS for patterns? If not, do it now. (2) Did you check database health if databases are connected? If not, query DB metrics. (3) Did you filter Sentry results by the investigation time window (not total counts)? (4) Correlate all findings into a coherent timeline with specific numbers. Produce your final diagnosis connecting errors → logs → metrics → infrastructure."
 
 EVALUATION_SYSTEM = """You are evaluating the progress of an SRE agent's work. Based on the conversation history and tool results gathered so far, produce a JSON assessment.
 
@@ -110,15 +165,24 @@ First, determine the type of request:
 
 **Data queries** (status checks, listing resources, fetching metrics, reading current state): If the user asked a straightforward data question — not diagnosing a problem — and the sub-agent successfully returned the requested data, mark as `complete` with high confidence (80+). The data was fetched and can be presented. No need for stack traces, root cause, or multi-source correlation.
 
-**Investigations** (error diagnosis, incident analysis, performance degradation): Evaluate whether the investigation has enough data to deliver a concrete, evidence-based diagnosis. A complete investigation has:
-- Specific error messages and stack traces (not just counts)
-- Metrics with actual numbers (response times, error rates, throughput)
-- Root cause identification backed by evidence
-- Code-level analysis where stack traces are available
+**Investigations** (error diagnosis, incident analysis, performance degradation): Evaluate whether the investigation has enough data to deliver a concrete, evidence-based diagnosis. A complete investigation MUST have:
+- Specific error messages and stack traces (not just counts or summaries)
+- Metrics with actual numbers (response times, error rates, throughput) scoped to the incident time window
+- **Log analysis**: Error log patterns, log volume anomalies, and unusual log messages during the incident window. If logs haven't been queried, the investigation is NOT complete.
+- **Database investigation** (when databases are in scope): DB metrics (connections, latency, slow queries). If databases are connected but not investigated, the investigation is NOT complete.
+- Root cause identification backed by evidence from multiple signals (errors + logs + metrics)
 - Timeline of events across sources
 - Cross-referenced data from multiple platforms where applicable
 
-For investigations, be strict: surface-level data (just listing apps or getting high-level counts) is NOT complete. The investigation must drill into the specifics. If fewer than 2 tool calls have been made for an investigation, return status "continue".
+For investigations, be strict:
+- Surface-level data (just listing errors or getting high-level counts) is NOT complete — confidence should be below 30.
+- Having errors but no log analysis is NOT complete — logs reveal patterns metrics cannot.
+- Having metrics but no database investigation (when DBs are in scope) is NOT complete.
+- Reporting total/lifetime Sentry event counts instead of time-windowed analysis is NOT complete.
+- If fewer than 3 tool calls have been made for an investigation, return status "continue".
+- **Sub-agent failures are NOT acceptable**: If a sub-agent was dispatched but ALL its tool calls returned errors, syntax failures, or zero results, the investigation is NOT complete. The sub-agent must be re-dispatched with corrected parameters. Do NOT accept "no data available" when the data source exists but queries failed.
+- **Zero APM/metric data when APM is connected**: If APM was queried but returned only errors or empty results (count: 0), this is a query failure, not a valid finding. Recommend re-dispatching with corrected query syntax. Confidence should be capped at 50% in this case.
+- **Unscoped Sentry results**: If Sentry returned 100 issues without time filtering, the investigation is NOT complete — results must be scoped to the incident time window.
 
 Produce your output as a JSON object with these fields:
 - status: "continue" or "complete"

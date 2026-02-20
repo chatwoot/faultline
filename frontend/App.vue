@@ -1,6 +1,9 @@
 <template>
   <!-- Loading screen while /api/auth/me is in flight -->
-  <div v-if="appLoading" class="flex items-center justify-center h-screen bg-white dark:bg-black">
+  <div
+    v-if="appLoading"
+    class="flex items-center justify-center h-screen bg-white dark:bg-black"
+  >
     <div class="flex flex-col items-center gap-4">
       <img src="/logo.svg" alt="Faultline" class="w-10 h-10 animate-pulse" />
     </div>
@@ -17,11 +20,16 @@
     >
       <!-- Logo -->
       <div class="border-b border-gray-300 dark:border-gray-700 p-3">
-        <div class="flex items-center gap-3" :class="sidebarCollapsed && 'justify-center'">
+        <div
+          class="flex items-center gap-3"
+          :class="sidebarCollapsed && 'justify-center'"
+        >
           <img src="/logo.svg" alt="Faultline" class="w-8 h-8 shrink-0" />
           <div v-if="!sidebarCollapsed">
             <h1 class="text-base font-semibold">Faultline</h1>
-            <p class="text-[11px] text-black/50 dark:text-white/50">Your Infra AI Agent</p>
+            <p class="text-[11px] text-black/50 dark:text-white/50">
+              Your Infra AI Agent
+            </p>
           </div>
         </div>
       </div>
@@ -62,11 +70,13 @@
           <img
             :src="authStore.user.avatarUrl"
             :alt="authStore.user.name"
-            class="w-5 h-5 rounded-full shrink-0"
+            class="w-7 h-7 rounded-sm shrink-0"
           />
           <div v-if="!sidebarCollapsed" class="flex-1 min-w-0">
             <p class="text-xs truncate">{{ authStore.user.name }}</p>
-            <p class="text-[10px] text-black/40 dark:text-white/40 truncate">{{ authStore.user.email }}</p>
+            <p class="text-[10px] text-black/40 dark:text-white/40 truncate">
+              {{ authStore.user.email }}
+            </p>
           </div>
           <button
             v-if="!sidebarCollapsed"
@@ -84,7 +94,10 @@
           class="flex items-center gap-3 w-full px-3 py-2 text-black/40 dark:text-white/40 hover:text-black dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 transition-colors rounded-sm"
           :class="sidebarCollapsed && 'justify-center'"
         >
-          <ChevronDoubleRightIcon v-if="sidebarCollapsed" class="w-4 h-4 shrink-0" />
+          <ChevronDoubleRightIcon
+            v-if="sidebarCollapsed"
+            class="w-4 h-4 shrink-0"
+          />
           <ChevronDoubleLeftIcon v-else class="w-4 h-4 shrink-0" />
           <span v-if="!sidebarCollapsed" class="text-xs">Collapse</span>
         </button>
@@ -99,8 +112,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue';
-import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router';
+import { ref, computed, watch, onMounted } from "vue";
+import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import {
   ChatBubbleLeftRightIcon,
   QueueListIcon,
@@ -109,30 +122,42 @@ import {
   ChevronDoubleLeftIcon,
   ChevronDoubleRightIcon,
   ArrowRightOnRectangleIcon,
-} from '@heroicons/vue/24/outline';
-import { useAuthStore } from './stores/auth';
-import { useAgentStore } from './stores/agent';
-import { useSocket } from './composables/useSocket';
-import AccountSwitcher from './components/AccountSwitcher.vue';
+} from "@heroicons/vue/24/outline";
+import { useAuthStore } from "./stores/auth";
+import { useAgentStore } from "./stores/agent";
+import { useSocket } from "./composables/useSocket";
+import AccountSwitcher from "./components/AccountSwitcher.vue";
 
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
 const agentStore = useAgentStore();
-const { connect: socketConnect, disconnect: socketDisconnect, getConsumer } = useSocket();
+const {
+  connect: socketConnect,
+  disconnect: socketDisconnect,
+  getConsumer,
+} = useSocket();
 
 const appLoading = ref(authStore.isAuthenticated);
-const stored = localStorage.getItem('faultline:sidebar');
-const sidebarCollapsed = ref(stored === 'collapsed');
+const stored = localStorage.getItem("faultline:sidebar");
+const sidebarCollapsed = ref(stored === "collapsed");
 
-const publicPaths = ['/login', '/signup', '/verify-email', '/resend-verification'];
+const publicPaths = [
+  "/login",
+  "/signup",
+  "/verify-email",
+  "/resend-verification",
+];
 const showSidebar = computed(() => {
-  return authStore.isAuthenticated && !publicPaths.some((p) => route.path.startsWith(p));
+  return (
+    authStore.isAuthenticated &&
+    !publicPaths.some((p) => route.path.startsWith(p))
+  );
 });
 
 // Persist collapse state
 watch(sidebarCollapsed, (v) => {
-  localStorage.setItem('faultline:sidebar', v ? 'collapsed' : 'expanded');
+  localStorage.setItem("faultline:sidebar", v ? "collapsed" : "expanded");
 });
 
 // On mount: if authenticated, fetch user info and connect socket
@@ -153,50 +178,60 @@ function listenForAccountEvents() {
   if (!cable) return;
 
   cable.subscriptions.create(
-    { channel: 'AccountChannel' },
+    { channel: "AccountChannel" },
     {
       received(data: Record<string, unknown>) {
         const type = data.type as string;
-        if (type === 'conversation:created') {
-          agentStore.addConversationToList(data as { id: string; title: string | null; createdAt: string; updatedAt: string; messageCount: number });
-        } else if (type === 'conversation:updated') {
-          agentStore.updateConversationInList(data as { id: string; title?: string; updatedAt: string });
+        if (type === "conversation:created") {
+          agentStore.addConversationToList(
+            data as {
+              id: string;
+              title: string | null;
+              createdAt: string;
+              updatedAt: string;
+              messageCount: number;
+            },
+          );
+        } else if (type === "conversation:updated") {
+          agentStore.updateConversationInList(
+            data as { id: string; title?: string; updatedAt: string },
+          );
         }
       },
-    }
+    },
   );
 }
 
 async function handleLogout() {
   socketDisconnect();
   await authStore.logout();
-  router.push('/login');
+  router.push("/login");
 }
 
 const navItems = [
   {
-    to: '/chat',
-    label: 'Chat',
+    to: "/chat",
+    label: "Chat",
     icon: ChatBubbleLeftRightIcon,
-    isActive: () => route.path.startsWith('/chat'),
+    isActive: () => route.path.startsWith("/chat"),
   },
   {
-    to: '/threads',
-    label: 'Threads',
+    to: "/threads",
+    label: "Threads",
     icon: QueueListIcon,
-    isActive: () => route.path === '/threads',
+    isActive: () => route.path === "/threads",
   },
   {
-    to: '/resource-maps',
-    label: 'Resources',
+    to: "/resource-maps",
+    label: "Resources",
     icon: MapIcon,
-    isActive: () => route.path.startsWith('/resource-maps'),
+    isActive: () => route.path.startsWith("/resource-maps"),
   },
   {
-    to: '/settings',
-    label: 'Settings',
+    to: "/settings",
+    label: "Settings",
     icon: Cog6ToothIcon,
-    isActive: () => route.path.startsWith('/settings'),
+    isActive: () => route.path.startsWith("/settings"),
   },
 ];
 </script>

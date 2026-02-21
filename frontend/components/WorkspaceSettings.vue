@@ -57,7 +57,7 @@
             </div>
           </div>
 
-          <div class="flex items-center gap-2">
+          <div class="grid grid-cols-[auto_1rem] items-center gap-2">
             <!-- Role badge / dropdown -->
             <div v-if="isOwner && member.userId !== authStore.user?.id" class="relative">
               <select
@@ -84,6 +84,7 @@
             >
               &times;
             </button>
+            <span v-else class="w-4" aria-hidden="true"></span>
           </div>
         </div>
       </div>

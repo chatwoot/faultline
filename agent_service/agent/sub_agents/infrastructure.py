@@ -52,6 +52,12 @@ class InfrastructureAgent(BaseSubAgent):
         if not is_ec2 and (is_db or is_lambda or is_ecs):
             excluded.append("describe_instances")
 
+        # Skip RDS discovery when instances are already known from resource map
+        ctx = self.config.investigation_context
+        has_rds = any(r.type == "rds" for r in ctx.resources)
+        if has_rds:
+            excluded.append("describe_db_instances")
+
         return excluded
 
     def get_own_tools(self) -> list[dict[str, Any]]:
@@ -78,22 +84,35 @@ class InfrastructureAgent(BaseSubAgent):
 
 You MUST call Performance Insights for these RDS instances. This is the HIGHEST PRIORITY investigation step for database incidents because it reveals WHICH specific SQL queries caused the CPU spike.
 
-Use `aws_get_resource_metrics` with:
+**Step 1 — Top SQL by load:** Call `aws_describe_dimension_keys` with:
 - **ServiceType**: "RDS"
 - **Identifier**: The DbiResourceId (e.g. {pi_ids}) — NOT the instance name
-- **MetricQueries**: Use `db.load` metric with `GroupBy` dimensions:
-  - `db.sql` — Top SQL statements by load
-  - `db.wait_event` — Top wait events (CPU, IO, Lock, etc.)
+- **Metric**: `db.load`
+- **GroupBy**: {{"Group": "db.sql_tokenized", "Dimensions": ["db.sql_tokenized.statement"]}}
 - **StartTime** / **EndTime**: Use the investigation time window (ISO 8601)
-- **PeriodInSeconds**: 60 for detailed view
+- **PeriodInSeconds**: 60
 
-Also call `aws_describe_dimension_keys` with:
+**Step 2 — Load timeseries:** Call `aws_get_resource_metrics` with:
 - **ServiceType**: "RDS"
 - **Identifier**: The DbiResourceId
-- **Metric**: `db.load`
-- **GroupBy**: `db.sql` to get the top SQL queries ranked by DB load
+- **MetricQueries**: Use Metric `db.load` with GroupBy Group `db.sql_tokenized`
+- **StartTime** / **EndTime**: Same as Step 1
+- **PeriodInSeconds**: 60
+
+**Valid GroupBy Groups** (use ONLY these in GroupBy.Group):
+  `db.sql`, `db.sql_tokenized`, `db.host`, `db.application`, `db.session_type`, `db.user`
+
+**WARNING:** `db.wait_event` and `db.wait_state` are **Metrics**, NOT GroupBy Groups.
+  To analyze wait events, use them as the **Metric** field (e.g. Metric=`db.wait_event`), not in GroupBy.Group.
 
 This data tells you exactly which queries consumed the most CPU — this is the root cause evidence."""
+
+        has_rds = any(r.type == "rds" for r in ctx.resources)
+        discovery_rule = (
+            "5. RDS instances are already known from the investigation context — do NOT call describe_db_instances. Use the instance names and DbiResourceIds directly."
+            if has_rds
+            else "5. Use resource names and IDs from the investigation context when available — do not re-discover."
+        )
 
         return f"""You are an infrastructure investigation agent specializing in AWS data. You have access to AWS tools that let you query CloudWatch metrics, EC2 instances, Lambda functions, RDS databases, CloudWatch Logs, and Performance Insights.
 
@@ -102,7 +121,7 @@ This data tells you exactly which queries consumed the most CPU — this is the 
 2. If a command fails, read the error, fix parameters, retry.
 3. Empty results may mean wrong region — try alternatives.
 4. Report specific metric values, not vague descriptions.
-5. Use resource names and IDs from the investigation context when available — do not re-discover.
+{discovery_rule}
 6. **Always compare incident-window metrics against baseline** (the period before the incident) to show what changed.
 {pi_section}
 

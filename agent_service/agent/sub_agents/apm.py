@@ -23,14 +23,30 @@ class APMAgent(BaseSubAgent):
             patterns.append("nr_")
         return patterns
 
+    def get_excluded_tool_patterns(self, task: str) -> list[str]:
+        excluded = []
+        ctx = self.config.investigation_context
+        has_nr_apps = any(r.type == "newrelic_app" for r in ctx.resources)
+        if has_nr_apps:
+            excluded.append("nr_list_entities")
+        return excluded
+
     def get_own_tools(self) -> list[dict[str, Any]]:
         return self.get_registry_tools_by_category("newrelic")
 
     def get_system_prompt(self) -> str:
+        ctx = self.config.investigation_context
+        has_nr_apps = any(r.type == "newrelic_app" for r in ctx.resources)
+        discovery_rule = (
+            "1. Use the New Relic app names and GUIDs from the investigation context — do NOT call nr_list_entities."
+            if has_nr_apps
+            else "1. Discover application names first — names may differ across platforms."
+        )
+
         return f"""You are an APM investigation agent specializing in New Relic data. Your job is to query New Relic for application performance, error rates, throughput, response times, **log patterns**, and **database performance** — all scoped to the investigation time window.
 
 # Core Rules
-1. Discover application names first — names may differ across platforms.
+{discovery_rule}
 2. Use NRQL queries to get specific metrics with exact numbers, always scoped to the investigation time window.
 3. **Always query logs** — this is mandatory, not optional. Logs reveal error patterns, unusual messages, and anomalies that metrics alone cannot show.
 4. **Always check database/datastore metrics** when databases are in scope — query latency, slow operations, and connection patterns.

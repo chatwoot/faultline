@@ -20,14 +20,30 @@ class ErrorMonitoringAgent(BaseSubAgent):
         # Error monitoring agent must always search for issues
         return ["sentry"]
 
+    def get_excluded_tool_patterns(self, task: str) -> list[str]:
+        excluded = []
+        ctx = self.config.investigation_context
+        has_sentry_projects = any(r.type == "sentry_project" for r in ctx.resources)
+        if has_sentry_projects:
+            excluded.extend(["find_organization", "find_project", "list_project"])
+        return excluded
+
     def get_own_tools(self) -> list[dict[str, Any]]:
         return self.get_mcp_tools("sentry")
 
     def get_system_prompt(self) -> str:
+        ctx = self.config.investigation_context
+        has_sentry_projects = any(r.type == "sentry_project" for r in ctx.resources)
+        discovery_rule = (
+            "1. Use the Sentry project slugs from the investigation context — do NOT call find_organization or find_project."
+            if has_sentry_projects
+            else "1. Discover project slugs first — they may differ from service names in other platforms."
+        )
+
         return f"""You are an error monitoring investigation agent specializing in Sentry data. Your job is to query Sentry for error tracking, stack traces, issue frequency, and affected users — always scoped to the investigation time window.
 
 # Core Rules
-1. Discover project slugs first — they may differ from service names in other platforms.
+{discovery_rule}
 2. **Always filter by time window.** Compare each issue's `firstSeen`/`lastSeen` against the investigation time window. Skip issues whose `lastSeen` is before the window.
 3. **Never report total/lifetime event counts.** They are misleading. Instead classify each issue as NEW (firstSeen within window) or RECURRING (active during window).
 4. Always retrieve full stack traces for the most relevant errors within the time window.

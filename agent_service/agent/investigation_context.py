@@ -236,6 +236,7 @@ class InvestigationContext:
         self.investigation_plan: InvestigationPlan | None = None
         self.critical_signals: list[dict[str, Any]] = []
         self.correlation_summary: str | None = None
+        self.pi_findings: list[dict[str, Any]] = []
 
     # ── Parse user message ──────────────────────────────────────
 
@@ -295,6 +296,10 @@ class InvestigationContext:
         result_str = result if isinstance(result, str) else __import__("json").dumps(result)
 
         self._extract_resources(tool_name, integration, result_str)
+
+        # Extract Performance Insights findings
+        if integration == "aws":
+            self._extract_pi_findings(tool_name, args, result_str)
 
         # AWS regions
         if integration == "aws":
@@ -511,6 +516,84 @@ class InvestigationContext:
             for m in re.findall(r'"(?:slug|project_slug)"\s*:\s*"([^"]+)"', result_str):
                 self._add_resource(ResourceEntry(name=m, type="sentry_project"))
 
+    def _extract_pi_findings(self, tool_name: str, args: dict[str, Any], result_str: str) -> None:
+        """Extract Performance Insights findings (top SQL, load metrics) from PI tool results."""
+        import json
+
+        tool_lower = tool_name.lower()
+        is_dimension_keys = "describe_dimension_keys" in tool_lower or "describe-dimension-keys" in tool_lower
+        is_resource_metrics = "get_resource_metrics" in tool_lower or "get-resource-metrics" in tool_lower
+
+        if not is_dimension_keys and not is_resource_metrics:
+            return
+
+        try:
+            data = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return
+
+        if not isinstance(data, dict):
+            return
+
+        if is_dimension_keys:
+            # Extract top SQL queries with their load values from Keys[]
+            keys = data.get("Keys", [])
+            if not keys:
+                return
+            finding: dict[str, Any] = {
+                "type": "top_sql_queries",
+                "source_tool": tool_name,
+                "metric": args.get("Metric", "db.load"),
+                "queries": [],
+            }
+            for key in keys[:10]:  # Top 10 queries
+                dimensions = key.get("Dimensions", {})
+                total = key.get("Total")
+                sql = (
+                    dimensions.get("db.sql_tokenized.statement")
+                    or dimensions.get("db.sql.statement")
+                    or dimensions.get("db.sql_tokenized.id")
+                    or str(dimensions)
+                )
+                entry = {"sql": sql, "load": total}
+                if dimensions.get("db.sql_tokenized.id"):
+                    entry["sql_id"] = dimensions["db.sql_tokenized.id"]
+                finding["queries"].append(entry)
+            if finding["queries"]:
+                self.pi_findings.append(finding)
+                logger.info(
+                    "Extracted %d PI top SQL queries (highest load: %.2f)",
+                    len(finding["queries"]),
+                    finding["queries"][0].get("load", 0) or 0,
+                )
+
+        elif is_resource_metrics:
+            # Extract peak/avg load from MetricList[].DataPoints[]
+            metric_list = data.get("MetricList", [])
+            if not metric_list:
+                return
+            finding = {
+                "type": "resource_metrics",
+                "source_tool": tool_name,
+                "metrics": [],
+            }
+            for metric_entry in metric_list:
+                metric_key = metric_entry.get("Key", {})
+                data_points = metric_entry.get("DataPoints", [])
+                if not data_points:
+                    continue
+                values = [dp.get("Value", 0) for dp in data_points if dp.get("Value") is not None]
+                if values:
+                    finding["metrics"].append({
+                        "metric": metric_key.get("Metric", ""),
+                        "group_by": metric_key.get("Dimensions", {}),
+                        "peak": max(values),
+                        "avg": sum(values) / len(values),
+                        "data_points": len(values),
+                    })
+            if finding["metrics"]:
+                self.pi_findings.append(finding)
+
     def _add_resource(self, entry: ResourceEntry) -> None:
         if not entry.name:
             return
@@ -647,6 +730,21 @@ class InvestigationContext:
                     attr_parts = ", ".join(f"{k}={v}" for k, v in r.attrs.items() if v)
                     parts.append(f"- {r.name}{id_part}{f' [{attr_parts}]' if attr_parts else ''}")
 
+        if self.pi_findings:
+            parts.append("\n**Performance Insights Data (REAL — cite these exactly, do NOT fabricate SQL):**")
+            for finding in self.pi_findings:
+                if finding["type"] == "top_sql_queries":
+                    parts.append(f"  _Top SQL by {finding.get('metric', 'db.load')} (from {finding['source_tool']}):_")
+                    for i, q in enumerate(finding.get("queries", []), 1):
+                        load_str = f" (load: {q['load']:.2f})" if q.get("load") is not None else ""
+                        parts.append(f"  {i}. `{q['sql']}`{load_str}")
+                elif finding["type"] == "resource_metrics":
+                    for m in finding.get("metrics", []):
+                        parts.append(
+                            f"  - {m['metric']}: peak={m['peak']:.2f}, avg={m['avg']:.2f} "
+                            f"({m['data_points']} data points)"
+                        )
+
         if self.investigation_plan:
             parts.append(f"\n{self.investigation_plan.build_status_summary()}")
 
@@ -687,6 +785,8 @@ class InvestigationContext:
             d["criticalSignals"] = self.critical_signals
         if self.correlation_summary:
             d["correlationSummary"] = self.correlation_summary
+        if self.pi_findings:
+            d["piFindings"] = self.pi_findings
         return d
 
     @classmethod
@@ -723,6 +823,7 @@ class InvestigationContext:
             ctx.investigation_plan = InvestigationPlan.from_dict(snapshot["investigationPlan"])
         ctx.critical_signals = snapshot.get("criticalSignals", [])
         ctx.correlation_summary = snapshot.get("correlationSummary")
+        ctx.pi_findings = snapshot.get("piFindings", [])
         return ctx
 
     def parse_all_user_messages(self, messages: list[dict[str, str]]) -> None:

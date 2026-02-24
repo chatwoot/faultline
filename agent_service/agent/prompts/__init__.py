@@ -118,7 +118,7 @@ GUIDANCE_AWS = """**AWS Reference (via AWS API MCP — uses AWS CLI commands):**
 **Database Investigation (MANDATORY when RDS/databases are in scope):**
 - Key RDS CloudWatch metrics: CPUUtilization, DatabaseConnections, FreeableMemory, ReadLatency, WriteLatency, ReadIOPS, WriteIOPS, DiskQueueDepth, SwapUsage
 - Connection exhaustion: Compare DatabaseConnections against the instance's max_connections limit
-- Performance Insights: Use `pi get-resource-metrics` with the DbiResourceId to get top SQL queries and wait events during the incident window
+- Performance Insights: Use `pi describe-dimension-keys` with Metric=`db.load` and GroupBy Group=`db.sql_tokenized` to find top SQL. Use `pi get-resource-metrics` with Metric=`db.load` and GroupBy Group=`db.sql_tokenized` for load timeseries. Valid GroupBy Groups: `db.sql`, `db.sql_tokenized`, `db.host`, `db.application`, `db.session_type`, `db.user`. WARNING: `db.wait_event` and `db.wait_state` are Metrics, NOT GroupBy Groups
 - Slow query logs: Check CloudWatch Logs group `/aws/rds/instance/<name>/slowquery` for queries during the incident
 - Always compare incident-window metrics against baseline (period before the incident) to identify what changed
 

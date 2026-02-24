@@ -24,6 +24,14 @@ SubAgentType = Literal["apm", "error_monitoring", "infrastructure", "alerting"]
 MAX_SUB_AGENT_ITERATIONS = 5
 MAX_TOOL_RESULT_CHARS = 30_000
 
+# Valid GroupBy Groups for Performance Insights get-resource-metrics
+PI_VALID_GROUPBY_GROUPS = {
+    "db.sql", "db.sql_tokenized", "db.host", "db.application",
+    "db.session_type", "db.user",
+}
+# These are valid as Metric names, NOT as GroupBy Groups
+PI_METRIC_ONLY_GROUPS = {"db.wait_event", "db.wait_state"}
+
 # Patterns for secrets that should be redacted from tool output
 _SECRET_PATTERNS = [
     # API keys and tokens with common prefixes
@@ -495,10 +503,18 @@ class BaseSubAgent(ABC):
 
             except Exception as e:
                 execution_time = int((time.time() - start_time) * 1000)
+                error_msg = f"TOOL ERROR — {tool_name} failed: {e}\n\nRetry with different parameters, or use an alternative tool."
+                # Add PI-specific hint for GroupBy errors
+                if ("resource_metrics" in tool_name.lower() or "get-resource-metrics" in tool_name.lower()) and "GroupBy" in str(e):
+                    error_msg += (
+                        "\n\nHINT: Valid GroupBy Groups for Performance Insights are: "
+                        "db.sql, db.sql_tokenized, db.host, db.application, db.session_type, db.user. "
+                        "db.wait_event and db.wait_state are Metrics, NOT GroupBy Groups."
+                    )
                 input_items.append({
                     "type": "function_call_output",
                     "call_id": fc["call_id"],
-                    "output": f"TOOL ERROR — {tool_name} failed: {e}\n\nRetry with different parameters, or use an alternative tool.",
+                    "output": error_msg,
                 })
                 self._emit_tool_update(all_tool_uses, on_tool_use, {
                     "id": fc["call_id"], "name": tool_name, "integration": integration,
@@ -508,13 +524,55 @@ class BaseSubAgent(ABC):
 
     # ── Tool interception ──────────────────────────────────────
 
+    def _intercept_pi_args(self, tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
+        """Intercept Performance Insights tool args to fix invalid GroupBy Groups."""
+        tool_lower = tool_name.lower()
+        if "resource_metrics" not in tool_lower and "get-resource-metrics" not in tool_lower:
+            return tool_args
+
+        metric_queries = tool_args.get("MetricQueries")
+        if not isinstance(metric_queries, list):
+            return tool_args
+
+        modified = False
+        for mq in metric_queries:
+            group_by = mq.get("GroupBy")
+            if not isinstance(group_by, dict):
+                continue
+            group = group_by.get("Group", "")
+            if group in PI_METRIC_ONLY_GROUPS:
+                logger.warning(
+                    "PI auto-correct: '%s' is a Metric, not a valid GroupBy Group. "
+                    "Replacing with 'db.sql_tokenized'.",
+                    group,
+                )
+                group_by["Group"] = "db.sql_tokenized"
+                modified = True
+            elif group and group not in PI_VALID_GROUPBY_GROUPS:
+                logger.warning(
+                    "PI auto-correct: unknown GroupBy Group '%s'. "
+                    "Replacing with 'db.sql_tokenized'. Valid groups: %s",
+                    group, ", ".join(sorted(PI_VALID_GROUPBY_GROUPS)),
+                )
+                group_by["Group"] = "db.sql_tokenized"
+                modified = True
+
+        if modified:
+            tool_args = {**tool_args, "MetricQueries": metric_queries}
+
+        return tool_args
+
     def _intercept_tool_args(self, tool_name: str, tool_args: dict[str, Any], integration: str | None = None) -> dict[str, Any]:
         """Intercept and fix tool arguments before execution.
 
+        - For PI tools: fix invalid GroupBy Groups.
         - For NRQL queries: fix timezone offsets, bare apdex(), wrong time windows.
         - For Sentry tools: auto-inject time window filters.
         - For all tools: validate timestamp arguments against the investigation window.
         """
+        # PI GroupBy validation (always, regardless of time window)
+        tool_args = self._intercept_pi_args(tool_name, tool_args)
+
         ctx = self.config.investigation_context
         tw_start = ctx.time_window.get("start")
         tw_end = ctx.time_window.get("end")
@@ -683,9 +741,18 @@ class BaseSubAgent(ABC):
         return None
 
     def _post_process_tool_result(self, tool_name: str, content: str, integration: str | None = None) -> str:
-        """Post-process tool results. For Sentry: filter by time window and cap results."""
+        """Post-process tool results to reduce token waste and improve quality."""
         tool_lower = tool_name.lower()
         integration_lower = (integration or "").lower()
+
+        # Compact all-zero NRQL TIMESERIES results
+        if "nrql" in tool_lower or "nr_run_nrql" in tool_lower:
+            content = self._compact_empty_timeseries(content)
+
+        # Summarize large CloudWatch log event outputs
+        if "filter_log_events" in tool_lower or "filter-log-events" in tool_lower:
+            content = self._summarize_log_events(content)
+
         if "sentry" not in integration_lower and "sentry" not in tool_lower:
             return content
 
@@ -739,6 +806,136 @@ class BaseSubAgent(ABC):
             except (ValueError, TypeError):
                 filtered.append(issue)
         return filtered
+
+    @staticmethod
+    def _compact_empty_timeseries(content: str) -> str:
+        """Replace all-zero NRQL TIMESERIES with a compact summary to save tokens."""
+        try:
+            data = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return content
+
+        if not isinstance(data, dict):
+            return content
+
+        results = data.get("results")
+        if not isinstance(results, list) or len(results) < 3:
+            return content
+
+        # Check if this is a TIMESERIES response (has beginTimeSeconds)
+        if not all(isinstance(r, dict) and "beginTimeSeconds" in r for r in results[:3]):
+            return content
+
+        # Check if ALL data values are zero/null
+        all_zero = True
+        for r in results:
+            for k, v in r.items():
+                if k in ("beginTimeSeconds", "endTimeSeconds", "inspectedCount"):
+                    continue
+                if isinstance(v, (int, float)) and v != 0:
+                    all_zero = False
+                    break
+                if isinstance(v, dict):
+                    if any(isinstance(sv, (int, float)) and sv != 0 for sv in v.values()):
+                        all_zero = False
+                        break
+            if not all_zero:
+                break
+
+        if all_zero:
+            # Replace with compact summary
+            n_buckets = len(results)
+            first_ts = results[0].get("beginTimeSeconds", 0)
+            last_ts = results[-1].get("endTimeSeconds", 0)
+            metric_keys = [k for k in results[0].keys() if k not in ("beginTimeSeconds", "endTimeSeconds", "inspectedCount")]
+            nrql = data.get("nrql", "")
+
+            summary = {
+                "nrql": nrql,
+                "summary": f"TIMESERIES returned 0 across all {n_buckets} time buckets for metrics: {', '.join(metric_keys)}",
+                "timeRange": {"beginTimeSeconds": first_ts, "endTimeSeconds": last_ts},
+                "totalBuckets": n_buckets,
+                "allZero": True,
+            }
+            logger.info("Compacted all-zero TIMESERIES: %d buckets → summary", n_buckets)
+            return json.dumps(summary)
+
+        return content
+
+    @staticmethod
+    def _summarize_log_events(content: str) -> str:
+        """Summarize large CloudWatch log event results into counts + samples."""
+        try:
+            data = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return content
+
+        if not isinstance(data, dict):
+            return content
+
+        events = data.get("events")
+        if not isinstance(events, list) or len(events) < 30:
+            return content  # Only summarize when there are many events
+
+        # Count events by message pattern (strip timestamps and connection IDs)
+        pattern_counts: dict[str, int] = {}
+        timestamps: list[int] = []
+
+        for event in events:
+            ts = event.get("timestamp")
+            if ts:
+                timestamps.append(ts)
+
+            msg = event.get("message", "")
+            # Normalize: strip leading timestamp, IP, user, PID
+            normalized = re.sub(
+                r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC:[\d.:()]+:\w+@\w+:\[\d+\]:',
+                '',
+                msg,
+            ).strip()
+            # Further normalize by removing unique identifiers
+            normalized = re.sub(r'\[\w{8}-\w{4}-\w{4}-\w{4}-\w{12}\]', '[REQ_ID]', normalized)
+
+            if not normalized:
+                normalized = msg[:100]
+
+            # Group by first 80 chars of the normalized pattern
+            key = normalized[:80]
+            pattern_counts[key] = pattern_counts.get(key, 0) + 1
+
+        # Build summary
+        total = len(events)
+        time_range = ""
+        if timestamps:
+            min_ts = min(timestamps)
+            max_ts = max(timestamps)
+            min_dt = datetime.fromtimestamp(min_ts / 1000, tz=timezone.utc) if min_ts > 1_000_000_000_000 else datetime.fromtimestamp(min_ts, tz=timezone.utc)
+            max_dt = datetime.fromtimestamp(max_ts / 1000, tz=timezone.utc) if max_ts > 1_000_000_000_000 else datetime.fromtimestamp(max_ts, tz=timezone.utc)
+            time_range = f"{min_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC to {max_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+
+        # Top patterns sorted by count
+        sorted_patterns = sorted(pattern_counts.items(), key=lambda x: -x[1])[:10]
+
+        summary_lines = [
+            f"**Log Events Summary** ({total} events{f', {time_range}' if time_range else ''})",
+            "",
+            "**Event patterns (top by frequency):**",
+        ]
+        for pattern, count in sorted_patterns:
+            summary_lines.append(f"  - [{count}x] {pattern}")
+
+        # Include 3 sample raw messages
+        summary_lines.append("")
+        summary_lines.append("**Sample messages:**")
+        for event in events[:3]:
+            summary_lines.append(f"  - {event.get('message', '')[:200]}")
+
+        has_next = data.get("nextToken") or data.get("nextForwardToken")
+        if has_next:
+            summary_lines.append(f"\n(Results were paginated — {total} events shown, more available)")
+
+        logger.info("Summarized %d log events into compact summary", total)
+        return "\n".join(summary_lines)
 
     def _extract_critical_signals(self, tool_name: str, content: str) -> list[dict[str, Any]]:
         """Scan tool output for critical patterns and return detected signals."""

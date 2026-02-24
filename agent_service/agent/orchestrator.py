@@ -120,6 +120,12 @@ async def orchestrate(request: AgentRunRequest) -> AsyncGenerator[str, None]:
         if incident_desc:
             ctx.generate_investigation_plan(incident_desc)
 
+    # Auto-resolve resource scope from user message before first dispatch
+    if not ctx.resources and request.resource_maps and user_messages:
+        last_user_msg = user_messages[-1].content if user_messages else ""
+        if last_user_msg:
+            _auto_resolve_resource_scope(last_user_msg, request.resource_maps, ctx)
+
     # Create sub-agents
     domain_integrations = [i for i in enabled_integrations if i != "github"]
     base_config = SubAgentConfig(
@@ -172,7 +178,7 @@ async def _run_orchestrator(
 ) -> AsyncGenerator[str, None]:
     now = datetime.now(timezone.utc)
     orchestrator_prompt = _build_orchestrator_prompt(
-        now, sub_agents, enabled_integrations, resource_maps,
+        now, sub_agents, enabled_integrations, resource_maps, ctx,
     )
 
     # Build input items from conversation history (only text messages)
@@ -202,9 +208,17 @@ async def _run_orchestrator(
     if is_follow_up:
         ctx_msg = ctx.build_context_message()
         if ctx_msg:
+            follow_up_directive = (
+                "\n\n[Follow-Up Query — IMPORTANT]\n"
+                "This is a follow-up message in an ongoing investigation. All resources have already been discovered.\n"
+                "- If the answer is already in the conversation, respond directly WITHOUT dispatching.\n"
+                "- If you must dispatch, use ONLY the single most relevant agent.\n"
+                "- Tell the agent to skip all discovery steps (list orgs, list projects, describe instances) "
+                "and query directly using the known resource names/IDs above."
+            )
             input_items.insert(0, {
                 "role": "developer",
-                "content": f"[Persisted Investigation Context — maintain this time window unless the user explicitly changes it]\n{ctx_msg}",
+                "content": f"[Persisted Investigation Context — maintain this time window unless the user explicitly changes it]\n{ctx_msg}{follow_up_directive}",
             })
 
     # Internal tools
@@ -212,11 +226,13 @@ async def _run_orchestrator(
     dispatch_tool = _build_dispatch_tool(available_agent_ids)
     evaluate_tool = _build_evaluate_tool()
     has_resource_maps = len(resource_maps) > 0
-    internal_tools = (
-        [_build_get_connected_resources_tool(), dispatch_tool, evaluate_tool]
-        if has_resource_maps
-        else [dispatch_tool, evaluate_tool]
-    )
+    resources_already_resolved = bool(ctx.resources and ctx.scoped_group_name)
+
+    # Skip _get_connected_resources when resources were auto-resolved from user message
+    if has_resource_maps and not resources_already_resolved:
+        internal_tools = [_build_get_connected_resources_tool(), dispatch_tool, evaluate_tool]
+    else:
+        internal_tools = [dispatch_tool, evaluate_tool]
 
     total_tokens = {"input": 0, "output": 0}
 
@@ -301,6 +317,11 @@ async def _run_orchestrator(
         # ── Run sub-agents ────────────────────────────────────
         if iteration == 0:
             active_call_id = first_dispatch_call["call_id"]
+
+        # Enrich tasks with known resource context for follow-ups
+        if is_follow_up:
+            assignments = _enrich_follow_up_tasks(assignments, ctx)
+
         results = []
 
         for assignment in assignments:
@@ -389,6 +410,17 @@ async def _run_orchestrator(
             input_items.append({
                 "role": "developer",
                 "content": 'This is the last orchestrator iteration. Strongly consider marking as "complete" unless critical data is clearly missing.',
+            })
+
+        # For follow-up data queries, hint that single-dispatch is often sufficient
+        if is_follow_up and iteration == 0:
+            input_items.append({
+                "role": "developer",
+                "content": (
+                    "[Follow-up evaluation hint] This is a follow-up query. If the sub-agent returned "
+                    "the specific data the user asked about, mark as complete with high confidence. "
+                    "Follow-up data queries do NOT require multi-agent investigation."
+                ),
             })
 
         evaluation = await _evaluate(client, model, input_items, orchestrator_prompt, internal_tools, total_tokens, results)
@@ -1171,6 +1203,126 @@ def _build_get_connected_resources_tool() -> dict[str, Any]:
 
 # ── Resource map helpers ──────────────────────────────────────
 
+def _auto_resolve_resource_scope(
+    user_message: str,
+    resource_maps: list[ResourceMap],
+    ctx: InvestigationContext,
+) -> None:
+    """Try to match user message content against resource map nodes/groups.
+
+    Extracts candidate service names from:
+    - PagerDuty URL path segments (e.g., /incidents/P1234ABC)
+    - Quoted strings in the message
+    - Word tokens that might be service/resource names
+
+    On match: populates ctx.resources and calls ctx.scope_to_resources().
+    """
+    import re as _re
+    candidates: list[str] = []
+
+    # Extract from PagerDuty URLs — check resource map nodes with source == "pagerduty"
+    pd_url_match = _re.search(r"pagerduty\.com/incidents/([A-Z0-9]+)", user_message, _re.IGNORECASE)
+    if pd_url_match:
+        # The incident ID itself won't match, but scan PD nodes for service name matches
+        for rmap in resource_maps:
+            for node in rmap.nodes:
+                if node.source == "pagerduty" and node.name:
+                    candidates.append(node.name)
+
+    # Extract quoted strings
+    for m in _re.findall(r'"([^"]{2,60})"', user_message):
+        candidates.append(m)
+    for m in _re.findall(r"'([^']{2,60})'", user_message):
+        candidates.append(m)
+
+    # Extract service-like tokens (words with hyphens/underscores that look like identifiers)
+    for m in _re.findall(r'\b([a-zA-Z][a-zA-Z0-9_-]{2,40})\b', user_message):
+        # Skip common non-service words
+        if m.lower() in {"the", "and", "for", "this", "that", "what", "how", "why",
+                         "are", "was", "were", "been", "has", "have", "had", "can",
+                         "could", "would", "should", "will", "with", "from", "into",
+                         "about", "which", "there", "their", "here", "some", "any",
+                         "investigate", "check", "look", "help", "please", "thanks",
+                         "https", "http", "com", "org", "net", "incidents", "pagerduty"}:
+            continue
+        candidates.append(m)
+
+    if not candidates:
+        return
+
+    # Try to match each candidate against resource map nodes/groups
+    for candidate in candidates:
+        normalized_candidate = normalize_name(candidate)
+        if not normalized_candidate or len(normalized_candidate) < 3:
+            continue
+
+        for rmap in resource_maps:
+            if not rmap.groups:
+                continue
+
+            node_by_id = {n.id: n for n in rmap.nodes}
+
+            # Pass 1: exact normalized name match on nodes
+            matched_node = next(
+                (n for n in rmap.nodes if n.normalizedName == normalized_candidate), None
+            )
+
+            # Pass 2: substring containment on nodes
+            if not matched_node:
+                matched_node = next(
+                    (n for n in rmap.nodes
+                     if normalized_candidate in n.normalizedName or n.normalizedName in normalized_candidate),
+                    None,
+                )
+
+            # Pass 3: group name match
+            if not matched_node:
+                for group in rmap.groups:
+                    ng = normalize_name(group.name)
+                    if ng == normalized_candidate or normalized_candidate in ng or ng in normalized_candidate:
+                        nodes = [node_by_id[nid] for nid in group.nodeIds if nid in node_by_id]
+                        if nodes:
+                            _apply_resource_scope(nodes, group.name, ctx)
+                            logger.info(
+                                "Auto-resolved resource scope from user message: group='%s' (%d resources)",
+                                group.name, len(nodes),
+                            )
+                            return
+                continue
+
+            # Find group containing matched node
+            for group in rmap.groups:
+                if matched_node.id in group.nodeIds:
+                    nodes = [node_by_id[nid] for nid in group.nodeIds if nid in node_by_id]
+                    if nodes:
+                        _apply_resource_scope(nodes, group.name, ctx)
+                        logger.info(
+                            "Auto-resolved resource scope from user message: matched node='%s', group='%s' (%d resources)",
+                            matched_node.name, group.name, len(nodes),
+                        )
+                        return
+
+
+def _apply_resource_scope(
+    nodes: list[ResourceNode],
+    group_name: str,
+    ctx: InvestigationContext,
+) -> None:
+    """Populate ctx.resources from resource map nodes and scope the context."""
+    from .investigation_context import ResourceEntry
+
+    for node in nodes:
+        ctx._add_resource(ResourceEntry(
+            name=node.name,
+            type=node.type,
+            id=node.externalId,
+            attrs=node.attrs,
+        ))
+
+    resource_names = [n.name for n in nodes]
+    ctx.scope_to_resources(resource_names, group_name)
+
+
 def _resolve_resource_scope(
     connected_call: Any,
     resource_maps: list[ResourceMap],
@@ -1244,6 +1396,7 @@ def _build_orchestrator_prompt(
     sub_agents: dict[SubAgentType, BaseSubAgent],
     enabled_integrations: list[str],
     resource_maps: list[ResourceMap],
+    ctx: InvestigationContext | None = None,
 ) -> str:
     agent_descs: dict[SubAgentType, str] = {
         "apm": "Queries New Relic for APM metrics, throughput, error rates, response times, transaction traces, and NRQL analytics",
@@ -1258,7 +1411,22 @@ def _build_orchestrator_prompt(
     )
 
     resource_section = ""
-    if resource_maps:
+    resources_pre_resolved = ctx and ctx.resources and ctx.scoped_group_name
+    if resources_pre_resolved:
+        resource_lines = [
+            f"\n\n## Resource Scope (Pre-resolved: {ctx.scoped_group_name})",  # type: ignore[union-attr]
+            "",
+            "Resources have been automatically resolved from the user's message. "
+            "All sub-agents will receive these resources in their investigation context. "
+            "Do NOT call `_get_connected_resources` — scoping is already done.",
+            "",
+            "Resolved resources:",
+        ]
+        for r in ctx.resources:  # type: ignore[union-attr]
+            id_part = f" (id: {r.id})" if r.id else ""
+            resource_lines.append(f"- [{r.type}] {r.name}{id_part}")
+        resource_section = "\n".join(resource_lines)
+    elif resource_maps:
         resource_section = """
 
 ## Resource Map
@@ -1305,6 +1473,18 @@ For ANY message that requires fetching live data from monitoring systems — whe
 - Only dispatch to agents whose domain is relevant.
 - Include known context in the task: service names, time windows, error messages, resource IDs.
 - For follow-up dispatches, reference specific findings from earlier rounds.
+
+## Follow-Up Query Handling
+
+When this is a follow-up message in an ongoing conversation (previous assistant responses exist):
+
+1. **Answer from context first.** If previous sub-agent findings already contain the answer, respond directly — do NOT dispatch.
+2. **Single-agent dispatch.** Follow-up data queries (counts, specific metrics, status checks) need at most ONE sub-agent. Dispatch to ONLY the single most relevant agent.
+3. **Specific task descriptions.** Include all known context in the dispatch task:
+   - Exact resource names and IDs from the investigation context (e.g., specific RDS instance names, log group paths, Sentry project slugs, New Relic entity GUIDs)
+   - The specific metric, count, or data point the user is asking about
+   - Explicit instruction: "Resources are already discovered in the investigation context — query directly without re-discovery."
+4. **No re-investigation.** A follow-up like "how many X errors?" or "what are the slow queries?" should NOT trigger a multi-agent investigation. It needs a single targeted query to one agent.
 
 Connected integrations: {', '.join(enabled_integrations)}
 Current time: {now.isoformat()}{resource_section}"""
@@ -1418,6 +1598,61 @@ def _build_data_quality_summary(results: list[Any] | None) -> str:
             lines.append(f"- **{agent_id}**: {successful_tools}/{total_tools} tools returned usable data.")
 
     return "\n".join(lines)
+
+
+def _enrich_follow_up_tasks(
+    assignments: list[dict[str, str]],
+    ctx: InvestigationContext,
+) -> list[dict[str, str]]:
+    """Enrich dispatch tasks with known resource context for follow-up queries.
+
+    Appends discovered resource names/IDs and a skip-discovery directive so
+    sub-agents don't waste tool calls re-discovering what's already known.
+    """
+    if not ctx.resources:
+        return assignments
+
+    # Map agent types to relevant resource types
+    agent_resource_types: dict[str, list[str]] = {
+        "infrastructure": ["rds", "ec2", "lambda", "log_group"],
+        "error_monitoring": ["sentry_project"],
+        "apm": ["newrelic_app"],
+        "alerting": [],  # PagerDuty doesn't need resource enrichment
+    }
+
+    enriched = []
+    for a in assignments:
+        agent_id = a["agentId"]
+        task = a["task"]
+
+        relevant_types = agent_resource_types.get(agent_id, [])
+        relevant = [r for r in ctx.resources if r.type in relevant_types]
+
+        if relevant:
+            lines = []
+            for r in relevant:
+                id_part = f" (id: {r.id})" if r.id else ""
+                useful_attrs = {k: v for k, v in r.attrs.items() if v and k not in ("name",)}
+                attr_str = f" [{', '.join(f'{k}={v}' for k, v in useful_attrs.items())}]" if useful_attrs else ""
+                lines.append(f"  - [{r.type}] {r.name}{id_part}{attr_str}")
+
+            task += (
+                "\n\nKnown resources (DO NOT re-discover — use these directly):\n"
+                + "\n".join(lines)
+                + "\n\nSkip all discovery steps (list orgs, list projects, describe instances). "
+                "Query the data directly using the resource names/IDs above."
+            )
+
+        # Add entity names for the relevant platform
+        entity_map = {"apm": "newrelic", "error_monitoring": "sentry", "alerting": "pagerduty"}
+        platform = entity_map.get(agent_id)
+        if platform and platform in ctx.entities:
+            names = ctx.entities[platform]
+            task += f"\n\nKnown {platform} entities: {', '.join(names)}"
+
+        enriched.append({"agentId": agent_id, "task": task})
+
+    return enriched
 
 
 def _is_empty_tool_output(output: str) -> bool:

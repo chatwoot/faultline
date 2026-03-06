@@ -392,6 +392,69 @@ async def _discover_sentry(settings: dict[str, Any]) -> list[dict[str, Any]]:
     return nodes
 
 
+# ── DigitalOcean ─────────────────────────────────────────────────
+
+
+async def _discover_digitalocean_instance(instance: dict[str, str]) -> list[dict[str, Any]]:
+    api_token = instance.get("api_token")
+    if not api_token:
+        return []
+
+    headers = {"Authorization": f"Bearer {api_token}"}
+    nodes: list[dict[str, Any]] = []
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://api.digitalocean.com/v2/droplets?per_page=200",
+                headers=headers,
+                timeout=30,
+            )
+            resp.raise_for_status()
+
+        droplets = resp.json().get("droplets", [])
+        for d in droplets:
+            networks = d.get("networks", {})
+            ipv4_list = networks.get("v4", [])
+            public_ip = next((n["ip_address"] for n in ipv4_list if n.get("type") == "public"), "")
+
+            nodes.append(_node(
+                name=d["name"],
+                type="droplet",
+                source="digitalocean",
+                external_id=str(d.get("id", "")),
+                attrs={
+                    "status": d.get("status", ""),
+                    "size": d.get("size_slug", ""),
+                    "public_ip": public_ip,
+                    "region": d.get("region", {}).get("slug", ""),
+                },
+            ))
+
+        logger.info("DigitalOcean discovery: %d droplets", len(nodes))
+    except Exception as exc:
+        logger.warning("DigitalOcean discovery failed: %s", exc)
+
+    return nodes
+
+
+async def _discover_digitalocean(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    instances = _get_instances(settings, "digitalocean")
+    if not instances:
+        return []
+    results = await asyncio.gather(
+        *[_discover_digitalocean_instance(inst) for inst in instances],
+        return_exceptions=True,
+    )
+    nodes: list[dict[str, Any]] = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.warning("DigitalOcean instance discovery failed: %s", result)
+        else:
+            nodes.extend(result)
+    return nodes
+
+
 # ── Edge inference ───────────────────────────────────────────────
 
 
@@ -526,6 +589,7 @@ async def discover_resources(
         _discover_aws(settings),
         _discover_pagerduty(settings),
         _discover_sentry(settings),
+        _discover_digitalocean(settings),
     ]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)

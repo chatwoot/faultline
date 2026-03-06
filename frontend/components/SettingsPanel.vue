@@ -278,6 +278,17 @@ const INTEGRATIONS: IntegrationDef[] = [
       { key: 'repo', label: 'Repository Name', type: 'text', placeholder: 'myapp' },
     ],
   },
+  {
+    id: 'digitalocean',
+    title: 'DigitalOcean',
+    description: 'Cloud infrastructure — Droplets, managed databases, load balancers, Kubernetes, and metrics',
+    icon: 'simple-icons:digitalocean',
+    multiple: true,
+    fields: [
+      { key: 'api_token', label: 'API Token', type: 'password', placeholder: 'dop_v1_...' },
+    ],
+    hint: 'Generate at DigitalOcean \u2192 API \u2192 Tokens. Read-only scope is sufficient.',
+  },
 ];
 
 // ── Component state ──

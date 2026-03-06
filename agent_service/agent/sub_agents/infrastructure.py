@@ -65,7 +65,10 @@ class InfrastructureAgent(BaseSubAgent):
         # plus custom boto3 tools from the registry
         mcp_tools = self.get_mcp_tools("aws")
         registry_tools = self.get_registry_tools_by_category("aws")
-        return [*mcp_tools, *registry_tools]
+        tools = [*mcp_tools, *registry_tools]
+        if "digitalocean" in self.config.enabled_integrations:
+            tools.extend(self.get_registry_tools_by_category("digitalocean"))
+        return tools
 
     def get_system_prompt(self) -> str:
         # Check if any discovered RDS resources have Performance Insights enabled

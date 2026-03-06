@@ -278,6 +278,17 @@ const INTEGRATIONS: IntegrationDef[] = [
       { key: 'repo', label: 'Repository Name', type: 'text', placeholder: 'myapp' },
     ],
   },
+  {
+    id: 'hetzner',
+    title: 'Hetzner Cloud',
+    description: 'Cloud infrastructure — servers, load balancers, networks, firewalls, and metrics',
+    icon: 'simple-icons:hetzner',
+    multiple: true,
+    fields: [
+      { key: 'api_token', label: 'API Token', type: 'password', placeholder: 'YOUR_TOKEN_HERE' },
+    ],
+    hint: 'Generate at Hetzner Cloud Console \u2192 Security \u2192 API Tokens. Read-only permission is sufficient.',
+  },
 ];
 
 // ── Component state ──

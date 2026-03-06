@@ -7,7 +7,7 @@ class Setting < ApplicationRecord
   validates :value, presence: true
   validate :openai_key_format, if: -> { key == 'openai.api_key' }
 
-  SENSITIVE_SUFFIXES = %w[api_key secret_access_key auth_token token].freeze
+  SENSITIVE_SUFFIXES = %w[api_key secret_access_key auth_token token api_token].freeze
 
   scope :visible, -> { where.not('key LIKE ?', '_internal.%') }
 

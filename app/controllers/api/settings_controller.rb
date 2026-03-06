@@ -31,7 +31,7 @@ module API
 
     def test_connection
       integration = params.require(:integration)
-      valid = %w[openai newrelic sentry aws github pagerduty]
+      valid = %w[openai newrelic sentry aws github pagerduty hetzner]
       return render_error('Invalid integration name') unless valid.include?(integration)
 
       @result = if integration_status[integration.to_sym]
@@ -44,7 +44,7 @@ module API
     def destroy_integration
       integration = params[:integration]
       index = params[:index].to_i
-      valid = %w[newrelic sentry aws github pagerduty]
+      valid = %w[newrelic sentry aws github pagerduty hetzner]
       return render_error('Invalid integration name') unless valid.include?(integration)
 
       prefix = "#{integration}.#{index}."
@@ -114,7 +114,8 @@ module API
         sentry: keys.any? { |k| k.match?(/\Asentry\.\d+\.auth_token\z/) },
         aws: keys.any? { |k| k.match?(/\Aaws\.\d+\.access_key_id\z/) },
         github: keys.any? { |k| k.match?(/\Agithub\.\d+\.token\z/) },
-        pagerduty: keys.any? { |k| k.match?(/\Apagerduty\.\d+\.api_key\z/) }
+        pagerduty: keys.any? { |k| k.match?(/\Apagerduty\.\d+\.api_key\z/) },
+        hetzner: keys.any? { |k| k.match?(/\Ahetzner\.\d+\.api_token\z/) }
       }
     end
   end

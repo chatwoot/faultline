@@ -392,6 +392,70 @@ async def _discover_sentry(settings: dict[str, Any]) -> list[dict[str, Any]]:
     return nodes
 
 
+# ── Hetzner ──────────────────────────────────────────────────────
+
+
+async def _discover_hetzner_instance(instance: dict[str, str]) -> list[dict[str, Any]]:
+    api_token = instance.get("api_token")
+    if not api_token:
+        return []
+
+    headers = {"Authorization": f"Bearer {api_token}"}
+    nodes: list[dict[str, Any]] = []
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://api.hetzner.cloud/v1/servers",
+                headers=headers,
+                timeout=30,
+            )
+            resp.raise_for_status()
+
+        servers = resp.json().get("servers", [])
+        for srv in servers:
+            public_net = srv.get("public_net", {})
+            ipv4 = public_net.get("ipv4", {}).get("ip", "") if isinstance(public_net.get("ipv4"), dict) else ""
+            location = srv.get("datacenter", {}).get("location", {})
+
+            nodes.append(_node(
+                name=srv["name"],
+                type="server",
+                source="hetzner",
+                external_id=str(srv.get("id", "")),
+                attrs={
+                    "status": srv.get("status", ""),
+                    "server_type": srv.get("server_type", {}).get("description", ""),
+                    "public_ipv4": ipv4,
+                    "datacenter": srv.get("datacenter", {}).get("name", ""),
+                    "location": location.get("city", ""),
+                },
+            ))
+
+        logger.info("Hetzner discovery: %d servers", len(nodes))
+    except Exception as exc:
+        logger.warning("Hetzner discovery failed: %s", exc)
+
+    return nodes
+
+
+async def _discover_hetzner(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    instances = _get_instances(settings, "hetzner")
+    if not instances:
+        return []
+    results = await asyncio.gather(
+        *[_discover_hetzner_instance(inst) for inst in instances],
+        return_exceptions=True,
+    )
+    nodes: list[dict[str, Any]] = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.warning("Hetzner instance discovery failed: %s", result)
+        else:
+            nodes.extend(result)
+    return nodes
+
+
 # ── Edge inference ───────────────────────────────────────────────
 
 
@@ -526,6 +590,7 @@ async def discover_resources(
         _discover_aws(settings),
         _discover_pagerduty(settings),
         _discover_sentry(settings),
+        _discover_hetzner(settings),
     ]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)

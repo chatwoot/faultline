@@ -186,6 +186,7 @@ All integrations are configured in **Settings** from the UI. Credentials are enc
 | **AWS** | Native (boto3) | CloudWatch, EC2, Lambda, RDS, ECS |
 | **GitHub** | MCP — `@modelcontextprotocol/server-github` (stdio) | Code search, file content, commits, blame |
 | **PagerDuty** | Native + MCP — `mcp.pagerduty.com` (streamable-http) | Incidents, services, escalation policies, on-call schedules |
+| **Hetzner Cloud** | Native (REST API v1) | Servers, load balancers, firewalls, networks, volumes, metrics |
 
 All integrations except OpenAI support multiple instances (e.g. multiple AWS accounts).
 

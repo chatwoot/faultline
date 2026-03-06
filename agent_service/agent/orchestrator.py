@@ -18,6 +18,7 @@ from .integrations.tool_registry import tool_registry
 from .integrations.aws import register_aws_tools
 from .integrations.newrelic import register_newrelic_tools
 from .integrations.pagerduty import register_pagerduty_tools
+from .integrations.hetzner import register_hetzner_tools
 from .name_matcher import normalize_name
 from .prompts import SYSTEM, EVALUATION_SYSTEM, CORRELATION_ANALYSIS
 from .sub_agents import (
@@ -45,6 +46,7 @@ INTEGRATION_TO_AGENT: dict[str, SubAgentType] = {
     "sentry": "error_monitoring",
     "aws": "infrastructure",
     "pagerduty": "alerting",
+    "hetzner": "infrastructure",
 }
 
 AGENT_CLASSES: dict[SubAgentType, type[BaseSubAgent]] = {
@@ -76,6 +78,7 @@ async def orchestrate(request: AgentRunRequest) -> AsyncGenerator[str, None]:
     register_aws_tools(resource_maps=request.resource_maps)
     register_newrelic_tools()
     register_pagerduty_tools()
+    register_hetzner_tools()
 
     # Initialize MCP
     mcp = MCPClientManager(request.settings)
@@ -1513,6 +1516,8 @@ def _get_enabled_integrations(settings: dict[str, Any]) -> list[str]:
         enabled.append("github")
     if _has_any_instance(settings, "pagerduty", "api_key"):
         enabled.append("pagerduty")
+    if _has_any_instance(settings, "hetzner", "api_token"):
+        enabled.append("hetzner")
     return enabled
 
 

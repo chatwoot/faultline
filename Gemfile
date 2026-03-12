@@ -25,8 +25,14 @@ gem 'jbuilder', '~> 2.12'
 gem 'oj', '~> 3.16'
 gem 'rack-cors', '~> 2.0'
 
-# HTTP client (for Python SSE bridge)
+# HTTP client (for Python SSE bridge and email providers)
 gem 'faraday', '~> 2.9'
+
+# HTTP client for email providers
+gem 'httparty', '~> 0.21'
+
+# AWS SDK for SES (optional)
+gem 'aws-sdk-ses', '~> 1.0', require: false
 
 # Encryption
 gem 'lockbox', '~> 1.3'

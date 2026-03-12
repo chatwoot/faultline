@@ -1,0 +1,17 @@
+<h2 style="color: #333;">Welcome to Faultline!</h2>
+<p>Hi <%= @user.name %>,</p>
+<p>Please click the link below to verify your email address:</p>
+
+<p style="margin: 20px 0;">
+  <a href="<%= @verification_url %>" style="background-color: #007bff; color: white; padding: 12px 20px; text-decoration: none; border-radius: 4px; display: inline-block;">
+    Verify Email Address
+  </a>
+</p>
+
+<p>If the button above doesn't work, copy and paste this link into your browser:</p>
+<p style="word-break: break-all; color: #666;"><%= @verification_url %></p>
+
+<p style="color: #666; font-size: 14px;">This link will expire in 24 hours.</p>
+
+<hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+<p style="color: #999; font-size: 12px;">If you didn't create this account, you can safely ignore this email.</p>

@@ -1,4 +1,5 @@
 :concurrency: <%= ENV.fetch("SIDEKIQ_CONCURRENCY", 5) %>
 :queues:
   - [agent_runs, 3]
+  - [emails, 2]
   - [default, 1]

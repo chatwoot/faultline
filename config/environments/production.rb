@@ -14,4 +14,24 @@ Rails.application.configure do
   config.action_cable.disable_request_forgery_protection = true
 
   config.active_record.dump_schema_after_migration = false
+
+  # ActionMailer
+  config.action_mailer.perform_deliveries = true
+  config.action_mailer.raise_delivery_errors = false
+  config.action_mailer.default_url_options = {
+    host: ENV.fetch('MAILER_HOST', AppConfig.cors_origin.sub(/^https?:\/\//, '')),
+    protocol: ENV.fetch('MAILER_PROTOCOL', 'https')
+  }
+
+  if AppConfig.smtp_host.present?
+    config.action_mailer.delivery_method = :smtp
+    config.action_mailer.smtp_settings = {
+      address: AppConfig.smtp_host,
+      port: ENV.fetch('SMTP_PORT', 587).to_i,
+      user_name: ENV['SMTP_USER'],
+      password: ENV['SMTP_PASSWORD'],
+      authentication: ENV.fetch('SMTP_AUTH', 'plain'),
+      enable_starttls_auto: ENV.fetch('SMTP_STARTTLS', 'true') == 'true'
+    }
+  end
 end

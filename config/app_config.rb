@@ -73,9 +73,71 @@ module AppConfig
     ENV.fetch('CORS_ORIGIN', 'http://localhost:5173')
   end
 
-  # ── SMTP / Email ────────────────────────────────────────────
+  # ── Admin Account Setup ─────────────────────────────────────
+  def admin_email
+    ENV.fetch('ADMIN_EMAIL', nil)
+  end
+
+  def admin_password
+    ENV.fetch('ADMIN_PASSWORD', 'admin123')
+  end
+
+  # ── Email Provider Configuration ────────────────────────────
+  def email_provider
+    ENV.fetch('EMAIL_PROVIDER', 'smtp') # smtp, resend, ses, sendgrid
+  end
+
+  def email_provider_configured?
+    case email_provider
+    when 'smtp'
+      smtp_host.present?
+    when 'resend'
+      resend_api_key.present?
+    when 'ses'
+      aws_access_key_id.present? && aws_secret_access_key.present?
+    when 'sendgrid'
+      sendgrid_api_key.present?
+    else
+      false
+    end
+  end
+
+  # API provider keys
+  def resend_api_key
+    ENV.fetch('RESEND_API_KEY', nil)
+  end
+
+  def sendgrid_api_key
+    ENV.fetch('SENDGRID_API_KEY', nil)
+  end
+
+  def aws_access_key_id
+    ENV.fetch('AWS_ACCESS_KEY_ID', nil)
+  end
+
+  def aws_secret_access_key
+    ENV.fetch('AWS_SECRET_ACCESS_KEY', nil)
+  end
+
+  def aws_region
+    ENV.fetch('AWS_REGION', 'us-east-1')
+  end
+
+  # ── SMTP / Email (existing) ─────────────────────────────────
   def smtp_host
     ENV.fetch('SMTP_HOST', nil)
+  end
+
+  def smtp_port
+    ENV.fetch('SMTP_PORT', 587).to_i
+  end
+
+  def smtp_user
+    ENV.fetch('SMTP_USER', nil)
+  end
+
+  def smtp_password
+    ENV.fetch('SMTP_PASSWORD', nil)
   end
 
   def smtp_from
@@ -83,7 +145,7 @@ module AppConfig
   end
 
   def email_configured?
-    smtp_host.present?
+    email_provider_configured?
   end
 
   # ── Logging ─────────────────────────────────────────────────

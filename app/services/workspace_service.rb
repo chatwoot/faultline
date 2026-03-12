@@ -35,6 +35,9 @@ class WorkspaceService
         expires_at: 7.days.from_now
       )
 
+      # Send invitation email if email is configured
+      SendWorkspaceInvitationJob.perform_async(invite.id) if AppConfig.email_configured?
+
       { id: invite.id, email: normalized_email, role: role }
     end
 

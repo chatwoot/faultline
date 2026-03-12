@@ -22,6 +22,11 @@ class AuthService
 
         user.update!(last_active_account_id: account.id)
 
+        # Send verification email if email is configured
+        if !auto_confirm && AppConfig.email_configured?
+          SendVerificationEmailJob.perform_async(user.id)
+        end
+
         { user: user_json(user), auto_confirmed: auto_confirm }
       end
     end
@@ -50,7 +55,7 @@ class AuthService
     end
 
     def verify_email(token)
-      user = User.find_by(verification_token: token)
+      user = User.find_by(email_verification_token: token)
       raise 'Invalid verification token' unless user
 
       if user.email_verification_expires_at && Time.current > user.email_verification_expires_at
@@ -85,6 +90,8 @@ class AuthService
         email_verification_token: SecureRandom.hex(32),
         email_verification_expires_at: 24.hours.from_now
       )
+
+      SendVerificationEmailJob.perform_async(user.id) if AppConfig.email_configured?
     end
 
     private
